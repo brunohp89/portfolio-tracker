@@ -1,0 +1,2010 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#0f131c">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Portfolio Tracker</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<style>
+:root{
+  --bg:#0f131c;--panel:#161b26;--panel2:#1c2230;--line:#262d3d;--text:#d7dbe4;--muted:#8a93a6;
+  --up:#26a69a;--down:#ef5350;--accent:#2962ff;--warn:#f0b429;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+button{font:inherit;color:inherit}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--muted)}
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+header .asof{color:var(--muted)}
+.pills{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+.pill{display:flex;align-items:center;gap:6px;padding:3px 9px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:12px;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#555}
+.dot.ok{background:var(--up);box-shadow:0 0 6px var(--up)}.dot.warn{background:var(--warn)}.dot.err{background:var(--down)}
+.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+.iconbtn:hover{border-color:#3a4358}
+.kpis{display:flex;gap:28px;padding:12px 16px 6px;flex-wrap:wrap;align-items:flex-end}
+.kpi .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+.kpi .val{font-size:15px}
+.kpi.big .val{font-size:26px;font-weight:600}
+.toolbar{display:flex;gap:10px;padding:8px 16px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--line)}
+.seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:none;border:0;padding:5px 10px;cursor:pointer;color:var(--muted);border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button:hover{color:var(--text);background:var(--panel2)}
+.seg button.on{color:#fff;background:var(--accent)}
+.sep{width:1px;height:22px;background:var(--line)}
+.chk{display:inline-flex;align-items:center;gap:5px;color:var(--muted);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--accent)}
+#picker{display:none;padding:8px 16px;border-bottom:1px solid var(--line);gap:6px;flex-wrap:wrap}
+#picker.show{display:flex}
+.chip{border:1px solid var(--line);background:var(--panel);border-radius:14px;padding:3px 10px;cursor:pointer;color:var(--muted);font-family:var(--mono);font-size:12px}
+.chip.on{border-color:var(--accent);color:#fff;background:#1d2b55}
+.chip.act{font-family:inherit;border-style:dashed}
+#chartwrap{position:relative;height:min(58vh,560px);min-height:320px;border-bottom:1px solid var(--line)}
+#chart{position:absolute;inset:0}
+#legend{position:absolute;left:12px;top:8px;z-index:3;pointer-events:none;font-size:12px;background:rgba(15,19,28,.72);padding:4px 8px;border-radius:4px}
+#legend b{font-weight:600}
+#overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
+#overlay.show{display:flex}
+#banner{display:none;padding:7px 16px;background:#2a2410;color:#e8d49a;border-bottom:1px solid #4a3f17;font-size:12px}
+#banner.show{display:block}
+table{width:100%;border-collapse:collapse}
+th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:var(--bg);cursor:pointer}
+th.l,td.l{text-align:left}
+tbody tr:hover{background:var(--panel)}
+td.sym{font-family:var(--mono);font-weight:600;cursor:pointer}
+.mk{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:#4a5163}
+.mk.open{background:var(--up);box-shadow:0 0 5px var(--up)}
+.mk.closed{background:var(--down)}
+td.sym:hover{color:#8fb0ff}
+td.nm{color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.src{font-size:10px;padding:1px 6px;border-radius:8px;border:1px solid var(--line);color:var(--muted)}
+.src.live{color:var(--up);border-color:#1f5e57}.src.poll{color:#8fb0ff;border-color:#2b3d73}
+.flash-up{animation:fu .8s}.flash-down{animation:fd .8s}
+@keyframes fu{from{background:rgba(38,166,154,.35)}to{background:transparent}}
+@keyframes fd{from{background:rgba(239,83,80,.35)}to{background:transparent}}
+.tablewrap{padding:0 6px 20px;overflow-x:auto}
+#pnl-break{padding:2px 16px 10px}
+#pnl-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel);margin:4px 0 8px}
+#pnl-bar span{display:block;height:100%}
+#pnl-items{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px}
+#pnl-items .it{display:flex;align-items:center;gap:6px;white-space:nowrap}
+#pnl-items .sw{width:9px;height:9px;border-radius:2px}
+#pnl-items .eq{color:var(--muted)}
+#closed-wrap summary{cursor:pointer;padding:10px 6px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+#closed-wrap summary b{color:var(--text)}
+footer{padding:14px 16px 30px;color:var(--muted);font-size:11.5px;line-height:1.6;border-top:1px solid var(--line)}
+footer a{color:#8fb0ff}
+/* settings modal */
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;z-index:50;overflow:auto;padding:40px 12px}
+#modal.show{display:flex}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(760px,100%);padding:18px 20px}
+.card h2{margin:0 0 12px;font-size:16px}
+.card h3{margin:18px 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.field{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.field input,.field textarea{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;font:inherit}
+.field textarea{font-family:var(--mono);font-size:11px;height:180px}
+.hint{color:var(--muted);font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{background:var(--accent);border:0;border-radius:6px;padding:7px 14px;cursor:pointer;color:#fff}
+.btn.sec{background:var(--panel2);border:1px solid var(--line);color:var(--text)}
+#msg{margin-top:8px;font-size:12px}
+@media (max-width:700px){.kpis{gap:16px}.kpi.big .val{font-size:22px}td.nm,th.nm{display:none}}
+#connect{position:fixed;inset:0;background:var(--bg);display:none;align-items:flex-start;justify-content:center;z-index:60;overflow:auto;padding:40px 12px}
+#connect.show{display:flex}
+#connect.over{background:rgba(0,0,0,.6)}
+#connect .card{width:min(520px,100%)}
+#connect-msg{min-height:1.4em;margin-top:6px}
+#boot-msg{padding:40px 16px;color:var(--muted);text-align:center;font-size:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Portfolio Tracker</h1>
+  <span class="asof" id="asof"></span>
+  <div class="pills">
+    <span class="pill" id="pill-crypto"><span class="dot"></span>Crypto</span>
+    <span class="pill" id="pill-stocks"><span class="dot"></span>Azioni/fondi</span>
+    <span class="pill" id="pill-nyse"><span class="mk" id="nyse-dot"></span><span id="nyse-txt">NYSE</span></span>
+    <span class="pill" id="pill-clock"><span class="num" id="clock">--:--:--</span></span>
+    <button class="iconbtn" id="btn-settings" title="Impostazioni">⚙ Impostazioni</button>
+  </div>
+</header>
+
+<div id="banner"></div>
+
+<section class="kpis">
+  <div class="kpi big"><div class="lbl" id="k-scope-lbl">Valore</div><div class="val num" id="k-value">—</div></div>
+  <div class="kpi" title="Dalla mezzanotte (ora locale), come la candela giornaliera"><div class="lbl">Variazione giorno</div><div class="val num" id="k-day">—</div></div>
+  <div class="kpi"><div class="lbl">P&amp;L aperto</div><div class="val num" id="k-pnl">—</div></div>
+  <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
+  <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
+  <div class="kpi"><div class="lbl">Nel periodo</div><div class="val num" id="k-period">—</div></div>
+  <div class="kpi"><div class="lbl">Peso sul totale</div><div class="val num" id="k-weight">—</div></div>
+</section>
+
+<section id="pnl-break">
+  <div id="pnl-bar"></div>
+  <div id="pnl-items"></div>
+</section>
+
+<div class="toolbar">
+  <div class="seg" id="seg-scope">
+    <button data-v="all">Tutto</button><button data-v="broker">Broker</button><button data-v="crypto">Crypto</button><button data-v="custom">Simboli…</button>
+  </div>
+  <span class="sep"></span>
+  <div class="seg" id="seg-interval"></div>
+  <div class="seg" id="seg-range"></div>
+  <span class="sep"></span>
+  <div class="seg" id="seg-type">
+    <button data-v="line">Linea</button><button data-v="area">Area</button><button data-v="candle">Candele</button>
+  </div>
+  <div class="seg" id="seg-scale">
+    <button data-v="0">$</button><button data-v="2">%</button><button data-v="1">Log</button>
+  </div>
+  <label class="chk" title="Includi CD e liquidità (valore fisso) nel totale"><input type="checkbox" id="opt-static">CD e liquidità</label>
+  <div class="seg" id="seg-mode" title="Posizioni attuali: le quantità di oggi applicate a tutta la storia. Storico reale: il valore effettivo del conto giorno per giorno dal Portfolio Brief (include versamenti, acquisti e vendite); solo Tutto, Broker e Crypto, candele 1G e 1S.">
+    <button data-v="positions">Posizioni attuali</button><button data-v="real">Storico reale</button>
+  </div>
+  <label class="chk" id="lbl-contrib" title="Linea dei versamenti netti cumulati (solo Storico reale, Tutto)"><input type="checkbox" id="opt-contrib">Versamenti</label>
+</div>
+
+<div id="picker"></div>
+
+<div id="chartwrap">
+  <div id="legend"></div>
+  <div id="chart"></div>
+  <div id="overlay"><span id="overlay-text">Caricamento…</span></div>
+</div>
+
+<div class="tablewrap">
+  <table>
+    <thead><tr id="thead"></tr></thead>
+    <tbody id="tbody"></tbody>
+    <tfoot id="tfoot"></tfoot>
+  </table>
+</div>
+
+<details class="tablewrap" id="closed-wrap" open>
+  <summary id="closed-sum"></summary>
+  <table>
+    <thead><tr><th class="l">Simbolo</th><th>Qtà</th><th>Incassi</th><th>Costo</th><th>P&amp;L</th><th>Dividendi</th><th>Interessi</th><th>Ultima uscita</th></tr></thead>
+    <tbody id="closed-body"></tbody>
+  </table>
+</details>
+
+<footer>
+  <div><b>Fonti prezzi.</b> Crypto: Coinbase Exchange (WebSocket in tempo reale e candele storiche; ripiego su Yahoo tramite proxy). Azioni ed ETF: scambi in tempo reale da Finnhub, più Yahoo Finance tramite il tuo proxy per lo storico e gli aggiornamenti a intervalli. I fondi comuni hanno solo il NAV giornaliero.</div>
+  <div><b>Metodo.</b> "Posizioni attuali" applica le quantità di oggi a tutta la storia (senza versamenti e vendite passate). "Storico reale" usa il valore del conto giorno per giorno dal Portfolio Brief e, dopo il suo ultimo giorno, le posizioni attuali a prezzi live; "Dall'ultimo versamento" parte dal giorno dopo l'ultimo gradino dei versamenti. Il P&amp;L chiuso è quello realizzato su vendite e scadenze secondo il brief. Massimi e minimi delle candele aggregate sono la somma dei massimi e minimi dei singoli titoli, quindi un limite superiore e inferiore della barra reale. CD e liquidità sono a valore fisso dello snapshot.</div>
+  <div>Grafici: <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts</a> (Apache 2.0).</div>
+</footer>
+
+<div id="modal">
+  <div class="card">
+    <h2>Impostazioni</h2>
+    <h3>Prezzi di azioni, ETF e fondi</h3>
+    <div class="field"><label>URL del proxy Yahoo (Cloudflare Worker)</label><input id="set-proxy" placeholder="https://yahoo-proxy.tuonome.workers.dev"><span class="hint">Già impostato sul tuo Worker. Cambialo solo se usi un altro proxy; lasciando il campo vuoto torna quello predefinito.</span></div>
+    <div class="field"><label>Token del proxy (opzionale)</label><input id="set-token" placeholder="vuoto se il Worker non ha la variabile TOKEN"></div>
+    <div class="field"><label>Chiave API Finnhub (scambi in tempo reale per azioni ed ETF)</label><input id="set-finnhub" placeholder="vuoto = chiave predefinita"><span class="hint">Già impostata sulla tua chiave. Scrivi <b>off</b> per disattivare Finnhub; lasciando il campo vuoto torna quella predefinita.</span></div>
+    <div class="field"><label>Intervallo di aggiornamento Yahoo a mercato aperto (secondi)</label><input id="set-poll" type="number" min="10" step="5"></div>
+    <div class="row"><button class="btn" id="btn-save">Salva e ricarica dati</button><button class="btn sec" id="btn-test">Prova il proxy</button><button class="btn sec" id="btn-close">Chiudi</button></div>
+
+    <h3>Posizioni</h3>
+    <div class="hint" id="conn-info"></div>
+    <div class="row"><button class="btn sec" id="btn-refresh">Aggiorna posizioni ora</button><button class="btn sec" id="btn-conn">Cambia collegamento</button></div>
+    <div class="hint" id="snap-info"></div>
+    <div class="field"><label>Importa a mano uno snapshot più recente (XLSX del Portfolio Brief, JSON esportato da qui, o CSV locale di drive_export)</label><input type="file" id="set-file" accept=".xlsx,.json,.csv"></div>
+    <div class="row"><button class="btn sec" id="btn-export">Esporta snapshot JSON</button><button class="btn sec" id="btn-reset">Torna allo snapshot del brief</button><a id="dl" style="display:none"></a></div>
+
+    <h3>Codice del Worker</h3>
+    <div class="hint">Cloudflare: Workers &amp; Pages → Create → Worker "Hello World" → Edit code → incolla → Deploy. Copia l'URL *.workers.dev qui sopra.</div>
+    <div class="field"><textarea id="worker-code" readonly></textarea></div>
+    <div class="row"><button class="btn sec" id="btn-copy">Copia codice</button></div>
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script src="./lightweight-charts.js"></script>
+<script id="worker-src" type="text/plain">/**
+ * Cloudflare Worker: minimal CORS proxy for the Yahoo Finance chart API.
+ *
+ * Only /v8/finance/chart/<symbol> and /v8/finance/spark are forwarded, so the
+ * Worker cannot be abused as a generic open proxy.
+ *
+ * Optional: set a secret named TOKEN in the Worker settings. Requests must then
+ * carry ?token=<TOKEN> (the tracker adds it automatically when configured).
+ *
+ * Deploy: Cloudflare dashboard -> Workers & Pages -> Create -> "Hello World"
+ * Worker -> Edit code -> paste this file -> Deploy. Copy the *.workers.dev URL
+ * into the tracker settings.
+ */
+
+const UPSTREAM = "https://query1.finance.yahoo.com";
+const ALLOWED = [/^\/v8\/finance\/chart\/[^/]+$/, /^\/v8\/finance\/spark$/];
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "*",
+  "Access-Control-Max-Age": "86400",
+};
+
+/** Cache TTL in seconds: short for live intraday data, longer for daily history. */
+function ttlFor(params) {
+  const interval = params.get("interval") || "";
+  if (interval === "1d" || interval === "1wk") return 300;
+  return 15;
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: CORS });
+
+    const url = new URL(request.url);
+    if (!ALLOWED.some((re) => re.test(url.pathname))) {
+      return new Response("not found", { status: 404, headers: CORS });
+    }
+    if (env.TOKEN && url.searchParams.get("token") !== env.TOKEN) {
+      return new Response("forbidden", { status: 403, headers: CORS });
+    }
+    url.searchParams.delete("token");
+
+    const upstreamUrl = UPSTREAM + url.pathname + url.search;
+    const cacheKey = new Request(upstreamUrl, { method: "GET" });
+    const cache = caches.default;
+
+    let response = await cache.match(cacheKey);
+    if (!response) {
+      const upstream = await fetch(upstreamUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36",
+          Accept: "application/json",
+        },
+      });
+      response = new Response(upstream.body, upstream);
+      response.headers.set("Cache-Control", `public, max-age=${ttlFor(url.searchParams)}`);
+      if (upstream.ok) ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    }
+
+    const out = new Response(response.body, response);
+    for (const [k, v] of Object.entries(CORS)) out.headers.set(k, v);
+    return out;
+  },
+};
+</script>
+<script>
+/* The tracker itself. It starts once the loader below has a snapshot to give it. */
+window.startTracker = function (BOOT) {
+'use strict';
+const LWC = window.LightweightCharts;
+const $ = (id) => document.getElementById(id);
+
+/* ------------------------------------------------------------------ storage */
+const store = {
+  get(key, dflt) { try { const v = localStorage.getItem('pt.' + key); return v == null ? dflt : JSON.parse(v); } catch { return dflt; } },
+  set(key, val) { try { localStorage.setItem('pt.' + key, JSON.stringify(val)); } catch { /* storage unavailable */ } },
+  del(key) { try { localStorage.removeItem('pt.' + key); } catch { /* ignore */ } },
+};
+
+/* ------------------------------------------------------------------ config */
+const INTERVALS = {
+  '1m':  { sec: 60,     base: '1m',  ranges: ['1D', '3D', '5D'],             def: '1D', intraday: true },
+  '5m':  { sec: 300,    base: '5m',  ranges: ['1D', '5D', '1M'],             def: '5D', intraday: true },
+  '15m': { sec: 900,    base: '15m', ranges: ['5D', '1M', '2M'],             def: '5D', intraday: true },
+  '1h':  { sec: 3600,   base: '1h',  ranges: ['1M', '3M', '6M'],             def: '3M', intraday: true },
+  '4h':  { sec: 14400,  base: '1h',  ranges: ['3M', '6M'],                   def: '6M', intraday: true },
+  '1D':  { sec: 86400,  base: '1d',  ranges: ['6M', '1Y', '2Y', '5Y', 'MAX'], def: '1Y', intraday: false },
+  '1W':  { sec: 604800, base: '1d',  ranges: ['1Y', '2Y', '5Y', 'MAX'],      def: '5Y', intraday: false },
+};
+const INTERVAL_LABEL = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1D': '1G', '1W': '1S' };
+const RANGE_LABEL = { '1D': '1G', '3D': '3G', '5D': '5G', '1M': '1M', '2M': '2M', '3M': '3M', '6M': '6M', '1Y': '1A', '2Y': '2A', '5Y': '5A', 'MAX': 'Max', 'LASTC': 'Dall\'ultimo versamento' };
+// Trading days for short ranges, calendar days for the rest. 2M stays inside Yahoo's 60-day intraday limit.
+const RANGE_DAYS = { '1D': 1, '3D': 3, '5D': 5, '1M': 30, '2M': 58, '3M': 92, '6M': 183, '1Y': 366, '2Y': 731, '5Y': 1827, 'MAX': null };
+const BASES = {
+  '1m':  { sec: 60,    yf: '1m',  cb: 60 },
+  '5m':  { sec: 300,   yf: '5m',  cb: 300 },
+  '15m': { sec: 900,   yf: '15m', cb: 900 },
+  '1h':  { sec: 3600,  yf: '60m', cb: 3600 },
+  '1d':  { sec: 86400, yf: '1d',  cb: 86400 },
+};
+const MAX_START = Date.UTC(2015, 0, 1) / 1000;
+// Default Yahoo proxy, delivered with the snapshot. Settings can override it; an empty field falls back to this.
+const DEFAULT_PROXY = (BOOT.snapshot.config && BOOT.snapshot.config.proxy) || '';
+// Default Finnhub key, delivered with the snapshot. Settings can override it; "off" disables Finnhub.
+const DEFAULT_FINNHUB = (BOOT.snapshot.config && BOOT.snapshot.config.finnhub) || '';
+function finnhubKey() {
+  const v = (state.settings.finnhub || '').trim();
+  if (v.toLowerCase() === 'off') return '';
+  return v || DEFAULT_FINNHUB;
+}
+const SCOPE_LABEL = { all: 'Valore portafoglio', broker: 'Valore Broker', crypto: 'Valore crypto', custom: 'Valore selezione' };
+
+/* ------------------------------------------------------------------ state */
+let embedded = BOOT.snapshot; // latest snapshot from Drive, replaced by applyRemote()
+const state = {
+  snap: pickSnapshot(),
+  settings: Object.assign({ proxy: '', token: '', finnhub: '', pollSec: 30 }, store.get('settings', {})),
+  scope: store.get('scope', 'all'),
+  custom: new Set(store.get('custom', [])),
+  interval: store.get('interval', '15m'),
+  range: store.get('range', null),
+  chartType: store.get('chartType', 'candle'),
+  scaleMode: store.get('scaleMode', 0),
+  includeStatic: store.get('includeStatic', true),
+  valueMode: store.get('valueMode', 'positions'), // 'positions' | 'real'
+  showContrib: store.get('showContrib', true),
+  live: {},            // symbol -> { price, prev, t, src }
+  barCache: new Map(), // cache key -> { at, bars, meta }
+  agg: [],             // aggregated bars of the current view, UTC seconds
+  chartTimes: [],      // chart time of each aggregated bar (local-time shifted, strictly increasing)
+  aggMeta: null,       // { syms, staticValue, startValue }
+  buildSeq: 0,
+  sortKey: 'value', sortDir: -1,
+  status: { crypto: 'off', stocks: 'off' },
+};
+if (!INTERVALS[state.interval]) state.interval = '1h';
+/** Periods offered for an interval: "since the last contribution" only with the real history. */
+function rangesFor(ivKey) {
+  const base = INTERVALS[ivKey].ranges;
+  return state.valueMode === 'real' && !INTERVALS[ivKey].intraday ? base.concat(['LASTC']) : base;
+}
+if (!state.range || !rangesFor(state.interval).includes(state.range)) state.range = INTERVALS[state.interval].def;
+
+function pickSnapshot() {
+  const saved = store.get('snapshot', null);
+  if (saved && saved.positions && saved.asof >= embedded.asof) return saved;
+  return embedded;
+}
+const positions = () => state.snap.positions;
+const bySym = (s) => positions().find((p) => p.symbol === s);
+const isMarketPos = (p) => p.kind !== 'static';
+
+/* ------------------------------------------------------------------ formatting */
+const fmtUsd = (v, d = 0) => (v == null || !isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtSigned = (v, d = 0) => (v == null || !isFinite(v)) ? '—' : (v >= 0 ? '+' : '') + fmtUsd(v, d);
+const fmtPct = (v, d = 2) => (v == null || !isFinite(v)) ? '—' : (v >= 0 ? '+' : '−') + Math.abs(v * 100).toFixed(d) + '%';
+const fmtPrice = (v) => {
+  if (v == null || !isFinite(v)) return '—';
+  const d = v >= 1000 ? 2 : v >= 1 ? 2 : 4;
+  return v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+};
+const fmtQty = (v) => v == null ? '—' : (Number.isInteger(v) ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { maximumFractionDigits: 8 }));
+const cls = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ------------------------------------------------------------------ time helpers */
+const nowSec = () => Math.floor(Date.now() / 1000);
+const nyParts = (tSec) => {
+  const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const o = {};
+  for (const p of f.formatToParts(new Date(tSec * 1000))) o[p.type] = p.value;
+  return { wd: o.weekday, h: +o.hour, m: +o.minute, date: `${o.year}-${o.month}-${o.day}` };
+};
+/** UTC offset of New York at a given instant, in seconds (negative). */
+function nyOffset(tSec) {
+  const p = nyParts(tSec);
+  const [y, mo, d] = p.date.split('-').map(Number);
+  const asUtc = Date.UTC(y, mo - 1, d, p.h, p.m) / 1000;
+  return asUtc - Math.floor(tSec / 60) * 60;
+}
+/** Timestamp of 16:00 New York time on a given UTC date (used to place fund NAVs at the close). */
+function nyCloseTs(dayStartUtc) {
+  const guess = dayStartUtc + 21 * 3600;
+  return dayStartUtc + 16 * 3600 - nyOffset(guess);
+}
+/* ------------------------------------------------------------------ NYSE calendar */
+/**
+ * NYSE full-day holidays and 1:00 p.m. early closes, derived from the exchange's rules so the
+ * calendar never expires. Checked against the published NYSE calendar for 2026-2028.
+ */
+const nyseCache = {};
+function nyseCalendar(y) {
+  if (nyseCache[y]) return nyseCache[y];
+  const iso = (m, d) => new Date(Date.UTC(y, m, d)).toISOString().slice(0, 10);
+  const wd = (m, d) => new Date(Date.UTC(y, m, d)).getUTCDay();
+  const nth = (m, w, n) => { const first = wd(m, 1); return 1 + ((w - first + 7) % 7) + 7 * (n - 1); };
+  const last = (m, w) => { const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate(); return dim - ((wd(m, dim) - w + 7) % 7); };
+  const observed = (m, d) => { const w = wd(m, d); return w === 6 ? [m, d - 1] : w === 0 ? [m, d + 1] : [m, d]; };
+  // Easter Sunday (anonymous Gregorian algorithm), Good Friday two days earlier.
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25),
+    g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4,
+    l = (32 + 2 * e + 2 * i - h - k) % 7, mm = Math.floor((a + 11 * h + 22 * l) / 451);
+  const em = Math.floor((h + l - 7 * mm + 114) / 31) - 1, ed = ((h + l - 7 * mm + 114) % 31) + 1;
+  const gf = new Date(Date.UTC(y, em, ed - 2));
+  const hol = new Map();
+  if (wd(0, 1) !== 6) { const [m, d] = observed(0, 1); hol.set(iso(m, d), 'Capodanno'); } // no Dec 31 make-up
+  hol.set(iso(0, nth(0, 1, 3)), 'Martin Luther King Jr. Day');
+  hol.set(iso(1, nth(1, 1, 3)), "Presidents' Day");
+  hol.set(gf.toISOString().slice(0, 10), 'Venerdì Santo');
+  hol.set(iso(4, last(4, 1)), 'Memorial Day');
+  { const [m, d] = observed(5, 19); hol.set(iso(m, d), 'Juneteenth'); }
+  { const [m, d] = observed(6, 4); hol.set(iso(m, d), 'Independence Day'); }
+  hol.set(iso(8, nth(8, 1, 1)), 'Labor Day');
+  const tg = nth(10, 4, 4);
+  hol.set(iso(10, tg), 'Thanksgiving');
+  { const [m, d] = observed(11, 25); hol.set(iso(m, d), 'Natale'); }
+  const early = new Map();
+  early.set(iso(10, tg + 1), 'giorno dopo Thanksgiving');
+  const isTradingDay = (m, d) => { const w = wd(m, d); return w !== 0 && w !== 6 && !hol.has(iso(m, d)); };
+  if (isTradingDay(11, 24)) early.set(iso(11, 24), 'vigilia di Natale');
+  if (wd(6, 3) >= 1 && wd(6, 3) <= 4 && isTradingDay(6, 3)) early.set(iso(6, 3), 'vigilia di Independence Day');
+  return (nyseCache[y] = { hol, early });
+}
+/** Status of the market a position trades on. kind: crypto | equity | fund | static */
+function marketStatus(kind, tSec = nowSec()) {
+  if (kind === 'crypto') return { open: true, label: 'Crypto: mercato aperto 24 ore su 24' };
+  if (kind === 'static') return { open: null, label: 'Non quotato (CD e liquidità)' };
+  const p = nyParts(tSec);
+  const cal = nyseCalendar(+p.date.slice(0, 4));
+  const fund = kind === 'fund' ? ' · fondo comune: NAV calcolato alla chiusura' : '';
+  if (p.wd === 'Sat' || p.wd === 'Sun') return { open: false, label: 'NYSE chiusa (weekend)' + fund };
+  if (cal.hol.has(p.date)) return { open: false, label: `NYSE chiusa (${cal.hol.get(p.date)})` + fund };
+  const mins = p.h * 60 + p.m;
+  const close = cal.early.has(p.date) ? 13 * 60 : 16 * 60;
+  const closeLbl = close === 13 * 60 ? `13:00 ET, chiusura anticipata: ${cal.early.get(p.date)}` : '16:00 ET';
+  if (mins >= 9 * 60 + 30 && mins < close) return { open: true, label: `NYSE aperta, chiude alle ${closeLbl}` + fund };
+  if (mins >= 4 * 60 && mins < 9 * 60 + 30) return { open: false, label: 'NYSE chiusa (pre-market, apre alle 9:30 ET)' + fund };
+  const postEnd = close === 13 * 60 ? 17 * 60 : 20 * 60; // on early-close days the late session ends at 17:00
+  if (mins >= close && mins < postEnd) return { open: false, label: `NYSE chiusa (after-hours fino alle ${postEnd / 60}:00 ET)` + fund };
+  return { open: false, label: 'NYSE chiusa' + fund };
+}
+
+function isUsMarketWindow(tSec = nowSec()) {
+  const p = nyParts(tSec);
+  if (p.wd === 'Sat' || p.wd === 'Sun') return false;
+  const mins = p.h * 60 + p.m;
+  return mins >= 4 * 60 && mins <= 20 * 60; // pre-market to after-hours
+}
+/**
+ * First day after the last step in cumulative net contributions (the brief's history),
+ * so the real value from there on moves only with the market. Falls back to the full history.
+ */
+function lastContribStart() {
+  const h = state.snap.history;
+  if (!h || !h.contrib || !h.dates) return MAX_START;
+  for (let i = h.contrib.length - 1; i > 0; i--) {
+    const a = h.contrib[i], b = h.contrib[i - 1];
+    if (a != null && b != null && isFinite(a) && isFinite(b) && Math.abs(a - b) >= 1) {
+      return localDayTs(h.dates[i]) + 86400;
+    }
+  }
+  return MAX_START;
+}
+function rangeStart(range, iv, cryptoOnly) {
+  if (range === 'LASTC') return lastContribStart();
+  const days = RANGE_DAYS[range];
+  if (days == null) return MAX_START;
+  const now = nowSec();
+  if (iv.intraday && days <= 5 && !cryptoOnly) {
+    // Count back trading days so that "1G" on a Monday still shows a full session.
+    let t = now, left = days;
+    while (left > 0) {
+      t -= 86400;
+      const wd = nyParts(t).wd;
+      if (wd !== 'Sat' && wd !== 'Sun') left--;
+    }
+    return t;
+  }
+  return now - days * 86400;
+}
+/** Seconds to add to UTC to get local wall-clock time at instant t. */
+const localOffset = (t) => -new Date(t * 1000).getTimezoneOffset() * 60;
+/**
+ * Start of the bar containing t. Bars of 4 hours or more follow local wall-clock time, so a
+ * daily candle runs from local midnight to midnight and a weekly one starts on Monday.
+ */
+function bucketStart(t, sec) {
+  if (sec < 14400) return Math.floor(t / sec) * sec;
+  const off = localOffset(t);
+  const loc = t + off;
+  const mon = 4 * 86400; // 1970-01-05 was a Monday
+  const b = sec === 604800 ? Math.floor((loc - mon) / sec) * sec + mon : Math.floor(loc / sec) * sec;
+  const start = b - off;
+  const off2 = localOffset(start); // DST may change between the bar start and t
+  return off2 === off ? start : b - off2;
+}
+/** Local midnight (as a UTC timestamp) of a YYYY-MM-DD date. */
+const localDayTs = (iso) => { const [y, m, d] = iso.slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d).getTime() / 1000; };
+const localMidnight = (t = nowSec()) => { const d = new Date(t * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
+/** Lightweight Charts renders UTC; shift intraday times so the axis shows local time. */
+function toChartTime(t) {
+  return INTERVALS[state.interval].intraday ? t - new Date(t * 1000).getTimezoneOffset() * 60 : t;
+}
+
+/* ------------------------------------------------------------------ network */
+class HttpError extends Error { constructor(status, url) { super(`HTTP ${status}`); this.status = status; this.url = url; } }
+let signalSupported = true;
+async function fetchJson(url, timeoutMs = 15000) {
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs));
+  const run = async (useSignal) => {
+    const ctl = useSignal ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+    try {
+      const r = await Promise.race([fetch(url, ctl ? { signal: ctl.signal } : {}), timeout]);
+      if (!r.ok) throw new HttpError(r.status, url);
+      return await r.json();
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  if (!signalSupported) return run(false);
+  try { return await run(true); }
+  catch (e) {
+    // Some embedded previews wrap fetch with postMessage and cannot clone an AbortSignal.
+    if (/clone|postMessage/i.test(String(e && e.message))) { signalSupported = false; return run(false); }
+    throw e;
+  }
+}
+/** Accept "name.workers.dev", "https://name.workers.dev/" and similar. */
+function normalizeProxy(raw) {
+  let u = (raw || '').trim().replace(/\/+$/, '');
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u;
+}
+function proxyUrl(path, baseOverride) {
+  const base = normalizeProxy(baseOverride || state.settings.proxy || DEFAULT_PROXY);
+  if (!base) return null;
+  const sep = path.includes('?') ? '&' : '?';
+  return base + path + (state.settings.token ? `${sep}token=${encodeURIComponent(state.settings.token)}` : '');
+}
+/** Tiny concurrency limiter so a 30-symbol view does not fire 30 requests at once. */
+function limiter(n) {
+  let active = 0; const q = [];
+  const next = () => { if (active >= n || !q.length) return; active++; const { fn, res, rej } = q.shift(); fn().then(res, rej).finally(() => { active--; next(); }); };
+  return (fn) => new Promise((res, rej) => { q.push({ fn, res, rej }); next(); });
+}
+const yfLimit = limiter(4);
+const cbLimit = limiter(1);
+
+const yahooSymbol = (p) => p.kind === 'crypto' ? `${p.symbol}-USD` : p.symbol.replace('.', '-');
+
+async function yahooChart(ysym, yfInterval, start, end, range) {
+  const span = range ? `range=${range}` : `period1=${start}&period2=${end}`;
+  const url = proxyUrl(`/v8/finance/chart/${encodeURIComponent(ysym)}?interval=${yfInterval}&${span}&includePrePost=false`);
+  if (!url) throw new Error('no-proxy');
+  const j = await yfLimit(() => fetchJson(url));
+  const res = j && j.chart && j.chart.result && j.chart.result[0];
+  if (!res) throw new Error((j && j.chart && j.chart.error && j.chart.error.description) || 'risposta Yahoo vuota');
+  const ts = res.timestamp || [];
+  const q = (res.indicators && res.indicators.quote && res.indicators.quote[0]) || {};
+  const bars = [];
+  for (let i = 0; i < ts.length; i++) {
+    const c = q.close && q.close[i];
+    if (c == null || !isFinite(c)) continue;
+    const o = q.open && q.open[i] != null ? q.open[i] : c;
+    const h = q.high && q.high[i] != null ? q.high[i] : Math.max(o, c);
+    const l = q.low && q.low[i] != null ? q.low[i] : Math.min(o, c);
+    bars.push({ t: ts[i], o, h, l, c });
+  }
+  const m = res.meta || {};
+  return { bars, meta: { price: m.regularMarketPrice, prev: m.chartPreviousClose ?? m.previousClose, t: m.regularMarketTime } };
+}
+
+async function coinbaseCandles(product, gran, start, end) {
+  const out = [];
+  let e = end;
+  while (e > start) {
+    const s = Math.max(start, e - gran * 300);
+    const url = `https://api.exchange.coinbase.com/products/${product}/candles?granularity=${gran}` +
+      `&start=${new Date(s * 1000).toISOString()}&end=${new Date(e * 1000).toISOString()}`;
+    const rows = await cbLimit(async () => { const r = await fetchJson(url); await sleep(340); return r; });
+    if (!Array.isArray(rows)) throw new Error('risposta Coinbase non valida');
+    for (const k of rows) out.push({ t: k[0], o: k[3], h: k[2], l: k[1], c: k[4] });
+    if (!rows.length && out.length) break; // before the listing date
+    e = s;
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out.filter((b, i) => i === 0 || b.t !== out[i - 1].t);
+}
+
+/**
+ * Base resolution for a view. Daily and weekly candles up to one year are built from hourly bars,
+ * so they split at local midnight for crypto too; longer views use daily bars.
+ */
+function baseFor(ivKey, range) {
+  const iv = INTERVALS[ivKey];
+  if (iv.intraday) return iv.base;
+  const days = range === 'LASTC' ? (nowSec() - lastContribStart()) / 86400 : RANGE_DAYS[range];
+  return days != null && days <= 366 ? '1h' : '1d';
+}
+/** Bars for one position at a base resolution, with source fallbacks and a short cache. */
+async function getBars(p, baseKey, start, end) {
+  const base = BASES[p.kind === 'fund' ? '1d' : baseKey];
+  const fetchStart = p.kind === 'fund' ? start - 10 * 86400 : start; // seed the first NAV
+  const key = `${p.symbol}|${base.yf}|${Math.floor(fetchStart / 600)}`;
+  const hit = state.barCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.data;
+
+  let data;
+  if (p.kind === 'crypto') {
+    // Coinbase returns 300 candles per request: for long windows Yahoo (one request) is faster.
+    const cbRequests = Math.ceil((end - fetchStart) / (base.cb * 300));
+    const viaCoinbase = async () => ({ bars: await coinbaseCandles(`${p.symbol}-USD`, base.cb, fetchStart, end), meta: {}, src: 'Coinbase' });
+    const viaYahoo = async () => ({ ...(await yahooChart(yahooSymbol(p), base.yf, fetchStart, end)), src: 'Yahoo' });
+    if (proxyUrl('/') && cbRequests > 6) {
+      try { data = await viaYahoo(); } catch { data = await viaCoinbase(); }
+    } else {
+      try { data = await viaCoinbase(); } catch (err) { if (!proxyUrl('/')) throw err; data = await viaYahoo(); }
+    }
+  } else {
+    data = { ...(await yahooChart(yahooSymbol(p), base.yf, fetchStart, end)), src: 'Yahoo' };
+    if (p.kind === 'fund') {
+      // A NAV is only known after the close: place it at 16:00 New York time.
+      data.bars = data.bars.map((b) => ({ ...b, t: nyCloseTs(Math.floor(b.t / 86400) * 86400) }));
+    }
+  }
+  if (p.kind === 'crypto' && base.sec === 86400) data = { ...data, bars: data.bars.map((b) => ({ ...b, t: b.t + 12 * 3600 })) };
+  state.barCache.set(key, { at: Date.now(), data });
+  noteBars(p.symbol, data.bars);
+  return data;
+}
+
+/* ------------------------------------------------------------------ live prices */
+function liveTick(sym, price, tSec, src, prev) {
+  if (!isFinite(price) || price <= 0) return;
+  const cur = state.live[sym] || {};
+  const dir = cur.price != null ? Math.sign(price - cur.price) : 0;
+  state.live[sym] = { price, t: tSec || nowSec(), src, prev: prev ?? cur.prev, dir };
+  dirty.table.add(sym);
+  if (inScope(sym)) dirty.chart = true;
+  scheduleFlush();
+}
+/** Newest known price: live tick or last fetched bar, whichever is more recent; else the snapshot. */
+const barLast = {}; // symbol -> { t, c } of the newest fetched bar
+function noteBars(sym, bars) {
+  const b = bars[bars.length - 1];
+  if (!b) return;
+  const t = Math.min(b.t, nowSec()); // daily crypto bars are stamped at noon UTC, possibly ahead of now
+  if (!barLast[sym] || t >= barLast[sym].t) barLast[sym] = { t, c: b.c };
+}
+function priceOf(p) {
+  const lv = state.live[p.symbol], bl = barLast[p.symbol];
+  if (lv && (!bl || lv.t >= bl.t)) return lv.price;
+  if (bl) return bl.c;
+  return p.price;
+}
+/*
+ * Reference price for the day change: the price at local midnight, the same point where the
+ * daily candle opens. Crypto: the last trade before midnight (Coinbase 1-minute candle, or the
+ * live price when midnight passes with the page open). Stocks and funds: the last regular close
+ * before midnight, from Yahoo's quote. Until a reference is known, the brief's previous close.
+ */
+const dayRef = { day: null, prices: {}, fromBars: {} };
+function ensureDay() {
+  const m = localMidnight();
+  if (dayRef.day === m) return m;
+  const rolled = dayRef.day != null;
+  dayRef.day = m;
+  dayRef.prices = {}; dayRef.fromBars = {};
+  // Page open across midnight: the current price is the price at the stroke of midnight.
+  // On first load the references arrive from Coinbase and Yahoo instead.
+  if (rolled) for (const p of positions()) if (isMarketPos(p)) { dayRef.prices[p.symbol] = priceOf(p); dayRef.fromBars[p.symbol] = true; }
+  return m;
+}
+function setDayRef(sym, price, fromBars) {
+  if (!isFinite(price) || price <= 0) return;
+  if (!fromBars && dayRef.fromBars[sym]) return; // bar-based references win over quote metadata
+  dayRef.prices[sym] = price;
+  if (fromBars) dayRef.fromBars[sym] = true;
+}
+/** Set references from the bars of a series that covers midnight: last close before it. */
+function refsFromSeries(series, m) {
+  for (const s of series) {
+    let ref = null;
+    for (const b of s.bars) { if (b.t < m) ref = b.c; else break; }
+    if (ref != null) setDayRef(s.p.symbol, ref, true);
+  }
+}
+async function loadDayRefs() {
+  const m = ensureDay();
+  const list = positions().filter(isMarketPos);
+  const res = await Promise.allSettled(list.map((p) => getBars(p, '1h', m - 5 * 86400, nowSec())));
+  if (dayRef.day !== m) return;
+  refsFromSeries(list.map((p, i) => ({ p, bars: res[i].status === 'fulfilled' ? res[i].value.bars : [] })), m);
+  dirty.table.add('*'); scheduleFlush();
+}
+const prevOf = (p) => dayRef.prices[p.symbol] ?? p.prev;
+
+/* Coinbase Exchange public WebSocket: ticker channel for the crypto positions. */
+let cbWs = null, cbRetry = 0;
+function connectCoinbase() {
+  const products = positions().filter((p) => p.kind === 'crypto').map((p) => `${p.symbol}-USD`);
+  if (!products.length) { setStatus('crypto', 'off', 'nessuna crypto'); return; }
+  try { if (cbWs) cbWs.close(); } catch { /* ignore */ }
+  setStatus('crypto', 'warn', 'connessione…');
+  const ws = new WebSocket('wss://ws-feed.exchange.coinbase.com');
+  cbWs = ws;
+  ws.onopen = () => { ws.send(JSON.stringify({ type: 'subscribe', product_ids: products, channels: ['ticker'] })); };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === 'subscriptions') { cbRetry = 0; setStatus('crypto', 'ok', 'live (Coinbase)'); }
+    if (m.type === 'ticker' && m.product_id) {
+      const sym = m.product_id.split('-')[0];
+      const t = m.time ? Math.floor(Date.parse(m.time) / 1000) : nowSec();
+      liveTick(sym, +m.price, t, 'live');
+    }
+    if (m.type === 'error') setStatus('crypto', 'err', m.message || 'errore');
+  };
+  ws.onclose = () => {
+    if (cbWs !== ws) return;
+    setStatus('crypto', 'err', 'riconnessione…');
+    const delay = Math.min(30000, 1000 * 2 ** cbRetry++);
+    setTimeout(connectCoinbase, delay);
+  };
+  ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+}
+
+/* Finnhub WebSocket (optional): real-time trades for stocks and ETFs. */
+let fhWs = null, fhRetry = 0, fhStatus = 'off';
+function connectFinnhub() {
+  try { if (fhWs) { const old = fhWs; fhWs = null; old.close(); } } catch { /* ignore */ }
+  const key = finnhubKey();
+  if (!key) { fhStatus = 'off'; refreshStocksPill(); return; }
+  const syms = positions().filter((p) => p.kind === 'equity').map((p) => p.symbol);
+  const ws = new WebSocket(`wss://ws.finnhub.io?token=${encodeURIComponent(key)}`);
+  fhWs = ws;
+  ws.onopen = () => { fhRetry = 0; fhStatus = 'ok'; refreshStocksPill(); for (const s of syms) ws.send(JSON.stringify({ type: 'subscribe', symbol: s })); };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === 'trade' && Array.isArray(m.data)) {
+      const lastBySym = {};
+      for (const tr of m.data) lastBySym[tr.s] = tr;
+      for (const s in lastBySym) liveTick(s, +lastBySym[s].p, Math.floor(lastBySym[s].t / 1000), 'live');
+    }
+    if (m.type === 'error') { fhStatus = 'err'; refreshStocksPill(m.msg); }
+  };
+  ws.onclose = () => {
+    if (fhWs !== ws) return;
+    fhStatus = 'err'; refreshStocksPill();
+    setTimeout(connectFinnhub, Math.min(60000, 2000 * 2 ** fhRetry++));
+  };
+  ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+}
+
+/* Yahoo polling through the proxy for stocks, ETFs and fund NAVs. */
+let pollTimer = null, yahooStatus = 'off', yahooErr = '';
+async function pollYahoo() {
+  clearTimeout(pollTimer);
+  const syms = positions().filter((p) => p.kind === 'equity' || p.kind === 'fund');
+  if (!proxyUrl('/') || !syms.length) { yahooStatus = 'off'; refreshStocksPill(); return; }
+  const open = isUsMarketWindow();
+  let ok = 0, fail = 0;
+  // Spark batches many symbols per request; fall back to one chart call per symbol.
+  for (let i = 0; i < syms.length; i += 20) {
+    const batch = syms.slice(i, i + 20);
+    let got = null;
+    try { got = await sparkQuotes(batch.map(yahooSymbol)); } catch { got = null; }
+    for (const p of batch) {
+      let q = got && got[yahooSymbol(p)];
+      if (!q) {
+        try { const r = await yahooChart(yahooSymbol(p), '5m', 0, 0, '1d'); q = r.meta; } catch (e) { yahooErr = e.message; }
+      }
+      if (q && isFinite(q.price)) {
+        ok++;
+        const m = ensureDay();
+        // No regular trade since midnight: the last price is the reference; otherwise the previous close is.
+        setDayRef(p.symbol, q.t != null && q.t < m ? q.price : q.prev, false);
+        liveTick(p.symbol, q.price, q.t, state.live[p.symbol]?.src === 'live' ? 'live' : 'poll');
+      }
+      else fail++;
+    }
+  }
+  yahooStatus = ok && !fail ? 'ok' : ok ? 'warn' : 'err';
+  if (ok) yahooErr = fail ? `${fail} simboli senza prezzo` : '';
+  refreshStocksPill();
+  const sec = open ? Math.max(10, +state.settings.pollSec || 30) : 600;
+  pollTimer = setTimeout(pollYahoo, sec * 1000);
+}
+async function sparkQuotes(ysyms) {
+  const url = proxyUrl(`/v8/finance/spark?symbols=${ysyms.map(encodeURIComponent).join(',')}&range=1d&interval=5m`);
+  const j = await yfLimit(() => fetchJson(url));
+  const out = {};
+  const results = j && j.spark && j.spark.result;
+  if (Array.isArray(results)) {
+    for (const r of results) {
+      const resp = r.response && r.response[0];
+      const m = resp && resp.meta;
+      if (m && isFinite(m.regularMarketPrice)) out[r.symbol] = { price: m.regularMarketPrice, prev: m.chartPreviousClose ?? m.previousClose, t: m.regularMarketTime };
+    }
+  } else if (j && typeof j === 'object') {
+    for (const s of Object.keys(j)) {
+      const r = j[s];
+      const closes = (r && r.close) || [];
+      const last = closes.filter((x) => x != null).pop();
+      if (last != null) out[s] = { price: last, prev: r.chartPreviousClose ?? r.previousClose, t: r.timestamp ? r.timestamp[r.timestamp.length - 1] : undefined };
+    }
+  }
+  if (!Object.keys(out).length) throw new Error('spark vuoto');
+  return out;
+}
+
+function setStatus(which, level, text) {
+  state.status[which] = level;
+  const pill = $(which === 'crypto' ? 'pill-crypto' : 'pill-stocks');
+  pill.querySelector('.dot').className = 'dot ' + (level === 'off' ? '' : level);
+  pill.title = text || '';
+  pill.lastChild.textContent = (which === 'crypto' ? 'Crypto' : 'Azioni/fondi') + (text ? ': ' + text : '');
+}
+function refreshStocksPill(extra) {
+  const parts = [];
+  if (fhStatus === 'ok') parts.push('Finnhub live');
+  else if (fhStatus === 'err') parts.push('Finnhub errore');
+  if (yahooStatus === 'ok') parts.push('Yahoo');
+  else if (yahooStatus === 'warn') parts.push('Yahoo parziale');
+  else if (yahooStatus === 'err') parts.push('Yahoo errore');
+  const level = fhStatus === 'ok' || yahooStatus === 'ok' ? 'ok' : (yahooStatus === 'warn' ? 'warn' : (yahooStatus === 'err' || fhStatus === 'err') ? 'err' : 'off');
+  setStatus('stocks', level, parts.length ? parts.join(' + ') : 'prezzi dello snapshot');
+  if (extra || yahooErr) $('pill-stocks').title = [extra, yahooErr].filter(Boolean).join(' · ');
+}
+
+/* ------------------------------------------------------------------ scope */
+function scopePositions() {
+  const all = positions();
+  switch (state.scope) {
+    case 'broker': return all.filter((p) => p.account === 'Broker');
+    case 'crypto': return all.filter((p) => p.kind === 'crypto');
+    case 'custom': return all.filter((p) => state.custom.has(p.symbol));
+    default: return all;
+  }
+}
+function inScope(sym) { return scopePositions().some((p) => p.symbol === sym); }
+const inScopeNow = (p) => (state.scope !== 'custom' || state.custom.has(p.symbol)) && (isMarketPos(p) || staticIncluded());
+const staticIncluded = () => state.includeStatic && state.scope !== 'crypto';
+
+/* ------------------------------------------------------------------ aggregation */
+/**
+ * Sum per-symbol bars (current quantities) on the union of their timestamps,
+ * forward-filling each symbol between its own bars, then resample to the view interval.
+ * series: [{ q, bars: [{t,o,h,l,c}] }]; constant: value added to every bar.
+ */
+function aggregate(series, constant, start, ivSec) {
+  const times = new Set();
+  for (const s of series) for (const b of s.bars) if (b.t >= start) times.add(b.t);
+  const ts = [...times].sort((a, b) => a - b);
+  if (!ts.length) return [];
+  const ptr = series.map(() => 0);
+  const lastClose = series.map((s) => {
+    // Seed with the last close before the window, or backfill with the first open.
+    let seed = null;
+    for (const b of s.bars) { if (b.t < start) seed = b.c; else break; }
+    return seed != null ? seed : (s.bars.length ? s.bars[0].o : 0);
+  });
+  series.forEach((s, i) => { while (ptr[i] < s.bars.length && s.bars[ptr[i]].t < start) ptr[i]++; });
+
+  const out = [];
+  let cur = null;
+  for (const t of ts) {
+    let O = constant, H = constant, L = constant, C = constant;
+    for (let i = 0; i < series.length; i++) {
+      const s = series[i], q = s.q;
+      const b = ptr[i] < s.bars.length && s.bars[ptr[i]].t === t ? s.bars[ptr[i]++] : null;
+      if (b) { O += q * b.o; H += q * b.h; L += q * b.l; C += q * b.c; lastClose[i] = b.c; }
+      else { const v = q * lastClose[i]; O += v; H += v; L += v; C += v; }
+    }
+    const k = bucketStart(t, ivSec);
+    if (!cur || cur.t !== k) {
+      // A portfolio has no gaps: each bar opens where the previous one closed, so a daily
+      // candle opens at the value at midnight, the same reference as the day change.
+      const o = cur ? cur.c : O;
+      cur = { t: k, o, h: Math.max(o, H), l: Math.min(o, L), c: C };
+      out.push(cur);
+    } else { cur.h = Math.max(cur.h, H); cur.l = Math.min(cur.l, L); cur.c = C; }
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ chart */
+const chart = LWC.createChart($('chart'), {
+  autoSize: true,
+  layout: { background: { type: 'solid', color: '#0f131c' }, textColor: '#8a93a6', fontSize: 11, attributionLogo: true },
+  grid: { vertLines: { color: '#1a2030' }, horzLines: { color: '#1a2030' } },
+  rightPriceScale: { borderColor: '#262d3d', scaleMargins: { top: 0.12, bottom: 0.08 } },
+  timeScale: { borderColor: '#262d3d', timeVisible: true, secondsVisible: false, rightOffset: 4 },
+  crosshair: { mode: LWC.CrosshairMode.Normal },
+  localization: { priceFormatter: (v) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 }) },
+});
+let mainSeries = null, mainSeriesType = null, contribSeries = null;
+
+function makeMainSeries() {
+  if (mainSeries && mainSeriesType === state.chartType) return;
+  if (mainSeries) chart.removeSeries(mainSeries);
+  mainSeriesType = state.chartType;
+  const common = { priceLineVisible: true, lastValueVisible: true };
+  if (state.chartType === 'candle') {
+    mainSeries = chart.addSeries(LWC.CandlestickSeries, { ...common, upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+  } else if (state.chartType === 'area') {
+    mainSeries = chart.addSeries(LWC.AreaSeries, { ...common, lineColor: '#2962ff', topColor: 'rgba(41,98,255,.35)', bottomColor: 'rgba(41,98,255,0)', lineWidth: 2 });
+  } else {
+    mainSeries = chart.addSeries(LWC.LineSeries, { ...common, color: '#2962ff', lineWidth: 2 });
+  }
+}
+const toSeriesPoint = (b, time) => state.chartType === 'candle'
+  ? { time, open: b.o, high: b.h, low: b.l, close: b.c }
+  : { time, value: b.c };
+/**
+ * Chart times must be strictly increasing. Shifting to local time can map two UTC bars
+ * to the same local time when DST ends (01:00-02:00 happens twice): nudge by one second.
+ */
+function computeChartTimes(bars) {
+  const out = new Array(bars.length);
+  let prev = -Infinity;
+  for (let i = 0; i < bars.length; i++) { const t = Math.max(toChartTime(bars[i].t), prev + 1); out[i] = t; prev = t; }
+  return out;
+}
+
+/** The single position shown in the chart, or null when the view holds several. */
+function soloPosition() {
+  if (state.scope !== 'custom' || (state.aggMeta && state.aggMeta.real)) return null;
+  const sc = scopePositions();
+  return sc.length === 1 && isMarketPos(sc[0]) && sc[0].qty > 0 ? sc[0] : null;
+}
+/*
+ * Average cost (PMC) line for a single symbol. The chart plots the position's value
+ * (quantity × price), so the line sits at the total cost basis = quantity × PMC, and the
+ * axis label shows the PMC per unit. The line is kept inside the visible range.
+ */
+let costLine = null;
+function renderCostLine() {
+  if (costLine) { try { mainSeries.removePriceLine(costLine); } catch { /* series replaced */ } costLine = null; }
+  const p = soloPosition();
+  const cost = p && p.cost > 0 ? p.cost : null;
+  mainSeries.applyOptions({
+    autoscaleInfoProvider: cost == null ? undefined : (orig) => {
+      const r = orig();
+      if (!r || !r.priceRange) return r;
+      return { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, cost), maxValue: Math.max(r.priceRange.maxValue, cost) } };
+    },
+  });
+  if (cost == null) return;
+  costLine = mainSeries.createPriceLine({
+    price: cost, color: '#f0b429', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed,
+    axisLabelVisible: true, title: `PMC ${fmtPrice(cost / p.qty)}`,
+  });
+}
+function renderSeries(fit) {
+  makeMainSeries();
+  state.chartTimes = computeChartTimes(state.agg);
+  mainSeries.setData(state.agg.map((b, i) => toSeriesPoint(b, state.chartTimes[i])));
+  chart.priceScale('right').applyOptions({ mode: +state.scaleMode });
+  renderCostLine();
+  renderRealOverlay();
+  if (fit) chart.timeScale().fitContent();
+  updateLegend(null);
+  updatePeriodKpi();
+}
+
+/** Cumulative net contributions (dashed), shown with the real history of the whole portfolio. */
+function renderRealOverlay() {
+  if (contribSeries) { chart.removeSeries(contribSeries); contribSeries = null; }
+  const iv = INTERVALS[state.interval];
+  const h = state.snap.history;
+  if (!state.showContrib || !state.aggMeta || !state.aggMeta.real || state.scope !== 'all' || !h || !h.contrib) return;
+  const start = state.aggMeta.start;
+  const cps = [];
+  for (let i = 0; i < h.dates.length; i++) {
+    const t = localDayTs(h.dates[i]);
+    if (t < start || h.contrib[i] == null || !isFinite(h.contrib[i])) continue;
+    const k = bucketStart(t, iv.sec);
+    if (cps.length && cps[cps.length - 1].time === k) cps[cps.length - 1].value = h.contrib[i];
+    else cps.push({ time: k, value: h.contrib[i] });
+  }
+  const lastC = cps.length ? cps[cps.length - 1].value : null;
+  const lastAgg = state.agg[state.agg.length - 1];
+  if (lastC != null && lastAgg && lastAgg.t > cps[cps.length - 1].time) cps.push({ time: lastAgg.t, value: lastC });
+  contribSeries = chart.addSeries(LWC.LineSeries, { color: '#8a93a6', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'versamenti', crosshairMarkerVisible: false,
+    autoscaleInfoProvider: () => null }); // do not squash the value scale
+  contribSeries.setData(cps);
+}
+
+function fmtBarTime(t) {
+  const iv = INTERVALS[state.interval];
+  const d = new Date(t * 1000);
+  if (!iv.intraday) return d.toLocaleDateString('it-IT', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric' }) + (iv.sec === 604800 ? ' (sett.)' : '');
+  return d.toLocaleString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function updateLegend(param) {
+  if (!state.agg.length) { $('legend').innerHTML = ''; return; }
+  let idx = state.agg.length - 1;
+  if (param && param.time != null) {
+    const want = param.time;
+    const j = state.chartTimes.indexOf(want);
+    if (j >= 0) idx = j;
+  }
+  const b = state.agg[idx];
+  const prev = idx > 0 ? state.agg[idx - 1].c : b.o;
+  const ch = b.c - prev;
+  const base = state.agg[0].o;
+  const k = (lbl, v) => `<span class="muted">${lbl}</span> <span class="num">${fmtUsd(v)}</span>`;
+  $('legend').innerHTML =
+    `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
+    [k('A', b.o), k('Max', b.h), k('Min', b.l), k('C', b.c)].join(' &nbsp;') +
+    ` &nbsp;<span class="num ${cls(ch)}">${fmtSigned(ch)} (${fmtPct(prev ? ch / prev : 0)})</span>` +
+    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b);
+}
+function soloLegend(b) {
+  const p = soloPosition();
+  if (!p) return '';
+  if (!(p.cost > 0)) return ` <br><span class="muted">PMC $0 (costo zero)</span>`;
+  const pmc = p.cost / p.qty, px = b.c / p.qty;
+  return `<br><span style="color:#f0b429">PMC ${fmtPrice(pmc)}</span> · <span class="muted">prezzo</span> <span class="num">${fmtPrice(px)}</span>` +
+    ` · <span class="muted">sul PMC</span> <span class="num ${cls(px - pmc)}">${fmtPct(px / pmc - 1)}</span>`;
+}
+function legendTitle() {
+  if (state.scope === 'custom') {
+    const s = [...state.custom];
+    return s.length <= 4 ? s.join(' + ') : `${s.length} simboli`;
+  }
+  const t = { all: 'Tutto il portafoglio', broker: 'Broker', crypto: 'Crypto' }[state.scope];
+  return state.aggMeta && state.aggMeta.real ? t + ' · storico reale' : t;
+}
+chart.subscribeCrosshairMove((param) => updateLegend(param && param.time != null ? param : null));
+
+/* ------------------------------------------------------------------ real history */
+/** Daily real values for a scope from the brief's history, or null if not available. */
+function realHistory(scope) {
+  const h = state.snap.history;
+  if (!h || !h.dates || !h.dates.length) return null;
+  let vals;
+  if (scope === 'all') vals = h.value;
+  else if (scope === 'broker' && h.broker) vals = h.broker;
+  else if (scope === 'crypto' && h.broker) vals = h.value.map((v, i) => (v == null || h.broker[i] == null) ? null : v - h.broker[i]);
+  else return null;
+  const out = [];
+  for (let i = 0; i < h.dates.length; i++) {
+    if (vals[i] == null || !isFinite(vals[i])) continue;
+    out.push({ t: localDayTs(h.dates[i]), v: vals[i] });
+  }
+  return out.length ? out : null;
+}
+function realReason() {
+  if (INTERVALS[state.interval].intraday) return 'lo storico reale è giornaliero: usa 1G o 1S';
+  if (state.scope === 'custom') return 'lo storico reale esiste solo per Tutto, Broker e Crypto';
+  if (!realHistory(state.scope)) return 'questo file non ha lo storico reale per questa vista (arriva con il prossimo aggiornamento del brief)';
+  return '';
+}
+const realActive = () => state.valueMode === 'real' && !realReason();
+/** Resample a list of daily bars to the view interval. */
+function resample(bars, sec) {
+  const out = [];
+  for (const b of bars) {
+    const k = bucketStart(b.t, sec);
+    const cur = out[out.length - 1];
+    if (!cur || cur.t !== k) out.push({ t: k, o: b.o, h: b.h, l: b.l, c: b.c });
+    else { cur.h = Math.max(cur.h, b.h); cur.l = Math.min(cur.l, b.l); cur.c = b.c; }
+  }
+  return out;
+}
+
+/** Rebuild the aggregated series for the current scope, interval and range. */
+async function rebuild(fit = true) {
+  const seq = ++state.buildSeq;
+  const iv = INTERVALS[state.interval];
+  const scope = scopePositions();
+  const market = scope.filter(isMarketPos);
+  const staticPos = staticIncluded() ? scope.filter((p) => !isMarketPos(p)) : [];
+  const staticValue = staticPos.reduce((s, p) => s + p.value, 0);
+  if (!market.length && !staticPos.length) {
+    state.agg = []; state.aggMeta = null; renderSeries(true); showOverlay(state.scope === 'custom' ? 'Seleziona almeno un simbolo' : 'Nessuna posizione'); return;
+  }
+  showOverlay('Caricamento dati…');
+  let start = rangeStart(state.range, iv, market.length > 0 && market.every((p) => p.kind === 'crypto'));
+  const end = nowSec();
+  if (realActive()) return rebuildReal(seq, iv, scope, start, end);
+  const results = await Promise.allSettled(market.map((p) => getBars(p, baseFor(state.interval, state.range), start, end)));
+  if (seq !== state.buildSeq) return;
+
+  const series = [], missing = [];
+  results.forEach((r, i) => {
+    const p = market[i];
+    if (r.status === 'fulfilled' && r.value.bars.length) series.push({ p, q: p.qty, bars: r.value.bars, src: r.value.src });
+    else missing.push({ p, why: r.status === 'rejected' ? r.reason && r.reason.message : 'nessun dato' });
+  });
+  const constant = staticValue + missing.reduce((s, m) => s + m.p.qty * priceOf(m.p), 0);
+  // Daily bars cannot give the price at local midnight; funds only have daily NAVs anyway.
+  const dailyBase = baseFor(state.interval, state.range) === '1d';
+  refsFromSeries(series.filter((x) => !dailyBase || x.p.kind === 'fund'), ensureDay());
+  if (state.range === 'MAX' && series.length) start = Math.max(start, ...series.map((s) => s.bars[0].t));
+  let agg = aggregate(series, constant, start, iv.sec);
+  if (!agg.length) {
+    // No history at all (e.g. no proxy and only stocks): show a single flat point at the current value.
+    const v = scopeValueNow();
+    agg = [{ t: bucketStart(end, iv.sec), o: v, h: v, l: v, c: v }];
+  }
+  state.agg = agg;
+  state.aggMeta = { start, series, staticValue, missing, interval: state.interval };
+  hideOverlay();
+  renderSeries(fit);
+  dirty.chart = true; scheduleFlush();
+  showMissingBanner(missing);
+}
+/**
+ * Real value: daily closes from the brief's history (each day's candle opens at the previous
+ * close), then, after the last day in the history, the current holdings priced live. The
+ * holdings cannot have changed since the history ends, because the brief rebuilds this file
+ * whenever they change; CDs and cash are always included because the real value includes them.
+ */
+async function rebuildReal(seq, iv, scope, start, end) {
+  const hist = realHistory(state.scope);
+  const lastT = hist[hist.length - 1].t;
+  const market = scope.filter(isMarketPos);
+  const staticValue = state.scope === 'crypto' ? 0 : scope.filter((p) => !isMarketPos(p)).reduce((s, p) => s + p.value, 0);
+  const gapStart = lastT - 7 * 86400;
+  const results = await Promise.allSettled(market.map((p) => getBars(p, '1h', gapStart, end)));
+  if (seq !== state.buildSeq) return;
+  const series = [], missing = [];
+  results.forEach((r, i) => {
+    const p = market[i];
+    if (r.status === 'fulfilled' && r.value.bars.length) series.push({ p, q: p.qty, bars: r.value.bars, src: r.value.src });
+    else missing.push({ p, why: r.status === 'rejected' ? r.reason && r.reason.message : 'nessun dato' });
+  });
+  const constant = staticValue + missing.reduce((s, m) => s + m.p.qty * priceOf(m.p), 0);
+  refsFromSeries(series, ensureDay());
+
+  const days = [];
+  let prev = null;
+  for (const x of hist) {
+    if (prev != null && x.t >= start) days.push({ t: x.t, o: prev, h: Math.max(prev, x.v), l: Math.min(prev, x.v), c: x.v });
+    prev = x.v;
+  }
+  if (state.range === 'MAX' && hist.length) start = hist[0].t;
+  const tail = aggregate(series, constant, lastT + 86400, 86400).filter((b) => b.t > lastT);
+  if (tail.length) tail[0].o = prev; // continue from the last real close
+  else {
+    const v = scopeValueNow(); const k = bucketStart(end, 86400);
+    if (k > lastT) tail.push({ t: k, o: prev, h: Math.max(prev, v), l: Math.min(prev, v), c: v });
+  }
+  if (tail.length) { tail[0].h = Math.max(tail[0].h, tail[0].o); tail[0].l = Math.min(tail[0].l, tail[0].o); }
+  state.agg = resample(days.concat(tail), iv.sec);
+  state.aggMeta = { start, series, staticValue, missing, interval: state.interval, real: true, lastRealT: lastT };
+  hideOverlay();
+  renderSeries(true);
+  dirty.chart = true; scheduleFlush();
+  showMissingBanner(missing);
+}
+function showMissingBanner(missing) {
+  const b = $('banner');
+  if (embeddedPreview) return; // keep the preview warning visible
+  if (!missing.length) { b.classList.remove('show'); return; }
+  const noProxy = !proxyUrl('/');
+  const names = missing.map((m) => m.p.symbol).join(', ');
+  b.innerHTML = noProxy
+    ? `Storico non disponibile per ${missing.length} simboli (${names}): configura il proxy Yahoo in <b>Impostazioni</b>. Nel grafico sono a valore costante (aggiornato dai prezzi live quando disponibili).`
+    : (() => {
+        const reasons = [...new Set(missing.map((m) => m.why))];
+        return reasons.length === 1
+          ? `Storico non disponibile per ${names} (${reasons[0]}). Nel grafico sono a valore costante.`
+          : `Storico non disponibile per: ${missing.map((m) => `${m.p.symbol} (${m.why})`).join(', ')}. Nel grafico sono a valore costante.`;
+      })();
+  b.classList.add('show');
+}
+function showOverlay(t) { $('overlay-text').textContent = t; $('overlay').classList.add('show'); }
+function hideOverlay() { $('overlay').classList.remove('show'); }
+
+/** Current value of the scope using the freshest price of every symbol. */
+function scopeValueNow() {
+  let v = 0;
+  for (const p of scopePositions()) {
+    if (!isMarketPos(p)) { if (staticIncluded()) v += p.value; continue; }
+    v += p.qty * priceOf(p);
+  }
+  return v;
+}
+/** Push live prices into the last bar of the chart (or open a new bar when the bucket rolls). */
+function applyLiveToChart() {
+  if (!state.agg.length || !state.aggMeta) return;
+  const iv = INTERVALS[state.interval];
+  // Value now: symbols with history use the live price if newer than their last bar, else their last close.
+  const m = state.aggMeta;
+  if (m.interval !== state.interval) return; // a rebuild for another interval is in flight
+  let v = m.staticValue, freshest = 0;
+  for (const x of m.missing) {
+    v += x.p.qty * priceOf(x.p);
+    const lv = state.live[x.p.symbol]; if (lv) freshest = Math.max(freshest, lv.t);
+  }
+  for (const s of m.series) {
+    // Same price as the KPIs and the table: newest of live tick and any fetched bar.
+    v += s.q * priceOf(s.p);
+    const lv = state.live[s.p.symbol];
+    if (lv) freshest = Math.max(freshest, lv.t);
+  }
+  const k = bucketStart(nowSec(), iv.sec);
+  const last = state.agg[state.agg.length - 1];
+  if (k > last.t) {
+    if (freshest < k) return; // nothing traded in this bucket yet (e.g. stocks outside market hours)
+    const nb = { t: k, o: last.c, h: Math.max(last.c, v), l: Math.min(last.c, v), c: v };
+    const ct = Math.max(toChartTime(k), state.chartTimes[state.chartTimes.length - 1] + 1);
+    state.agg.push(nb); state.chartTimes.push(ct);
+    mainSeries.update(toSeriesPoint(nb, ct));
+  } else if (k === last.t) {
+    last.c = v; last.h = Math.max(last.h, v); last.l = Math.min(last.l, v);
+    mainSeries.update(toSeriesPoint(last, state.chartTimes[state.chartTimes.length - 1]));
+  }
+  updateLegend(null);
+  updatePeriodKpi();
+}
+
+/* ------------------------------------------------------------------ KPIs and table */
+function updateKpis() {
+  const scope = scopePositions();
+  let value = 0, day = 0, pnl = 0, prevVal = 0;
+  for (const p of scope) {
+    if (!isMarketPos(p)) {
+      if (!staticIncluded()) continue;
+      value += p.value; pnl += p.value - p.cost; prevVal += p.value; continue;
+    }
+    const px = priceOf(p), pv = prevOf(p);
+    value += p.qty * px; pnl += p.qty * px - p.cost;
+    if (pv) { day += p.qty * (px - pv); prevVal += p.qty * pv; } else prevVal += p.qty * px;
+  }
+  let total = 0;
+  for (const p of positions()) total += isMarketPos(p) ? p.qty * priceOf(p) : p.value;
+  $('k-scope-lbl').textContent = SCOPE_LABEL[state.scope];
+  $('k-value').textContent = fmtUsd(value, 2);
+  $('k-day').innerHTML = `<span class="${cls(day)}">${fmtSigned(day)} (${fmtPct(prevVal ? day / prevVal : 0)})</span>`;
+  $('k-pnl').innerHTML = `<span class="${cls(pnl)}">${fmtSigned(pnl)} (${fmtPct(value - pnl ? pnl / (value - pnl) : 0)})</span>`;
+  const realized = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : null;
+  $('k-closed').innerHTML = realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`;
+  renderPnlBreakdown();
+  $('k-weight').textContent = total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—';
+  document.title = `${fmtUsd(value)} · Portfolio Tracker`;
+}
+/** Closed positions relevant to the current view (all of them are Broker lines). */
+function scopeClosed() {
+  const closed = state.snap.closed || [];
+  if (state.scope === 'crypto') return closed.filter((c) => (bySym(c.symbol) || {}).kind === 'crypto');
+  if (state.scope === 'custom') return closed.filter((c) => state.custom.has(c.symbol));
+  return closed;
+}
+function scopeRealized() {
+  const rows = scopeClosed();
+  if ((state.scope === 'all' || state.scope === 'broker') && isFinite(state.snap.realized)) return state.snap.realized;
+  return rows.reduce((s, c) => s + (c.pnl || 0), 0);
+}
+function renderClosed() {
+  const rows = [...scopeClosed()].sort((a, b) => Math.abs(b.pnl || 0) - Math.abs(a.pnl || 0));
+  const tot = scopeRealized();
+  const has = state.snap.closed != null;
+  $('closed-sum').innerHTML = has
+    ? `Posizioni chiuse · <b>${rows.length}</b> ${rows.length === 1 ? 'linea' : 'linee'} · P&amp;L <b class="${cls(tot)}">${fmtSigned(tot, 2)}</b>`
+    : 'Posizioni chiuse · non presenti in questo snapshot';
+  $('closed-body').innerHTML = rows.length ? rows.map((c) => `<tr>
+      <td class="l sym">${c.symbol}</td><td class="num">${fmtQty(c.qty)}</td><td class="num">${fmtUsd(c.proceeds, 2)}</td>
+      <td class="num">${fmtUsd(c.cost, 2)}</td><td class="num ${cls(c.pnl)}">${fmtSigned(c.pnl, 2)}</td>
+      <td class="num">${c.held ? '<span class="muted">in posizioni</span>' : fmtUsd(c.dividends || 0, 2)}</td>
+      <td class="num">${c.held ? '<span class="muted">in posizioni</span>' : fmtUsd(c.interest || 0, 2)}</td>
+      <td class="num">${c.last || '—'}</td></tr>`).join('')
+    : `<tr><td class="l muted" colspan="8">${has ? 'Nessuna posizione chiusa in questa vista' : 'Importa uno snapshot recente per vederle'}</td></tr>`;
+}
+/**
+ * P&L components for the current view. Open P&L is live; the rest comes from the brief.
+ * Fees are tracked per account, not per symbol, so they are left out of a custom selection.
+ */
+function pnlParts() {
+  const scope = scopePositions();
+  let open = 0;
+  for (const p of scope) {
+    if (!isMarketPos(p)) { if (staticIncluded()) open += p.value - p.cost; continue; }
+    open += p.qty * priceOf(p) - p.cost;
+  }
+  const inc = state.snap.income || null;
+  const ibs = state.snap.income_by_symbol || {};
+  let div = 0, int = 0, fees = 0;
+  if (state.scope === 'all' || state.scope === 'broker') {
+    div = inc ? inc.dividends : NaN; int = inc ? inc.interest : NaN; fees = inc ? inc.fees : NaN;
+  } else if (state.scope === 'custom') {
+    for (const sym of state.custom) { const x = ibs[sym]; if (x) { div += x.div || 0; int += x.int || 0; } }
+    fees = null;
+  }
+  const closed = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : NaN;
+  const parts = [
+    { k: 'open', l: 'P&L aperto', v: open, c: '#2962ff' },
+    { k: 'closed', l: 'P&L chiuso', v: closed, c: '#26a69a' },
+    { k: 'div', l: 'Dividendi e distribuzioni', v: div, c: '#7e57c2' },
+    { k: 'int', l: 'Interessi', v: int, c: '#f0b429' },
+    { k: 'fees', l: 'Commissioni', v: fees == null ? null : -fees, c: '#ef5350' },
+  ];
+  const known = parts.filter((x) => x.v != null && isFinite(x.v));
+  const total = known.reduce((s, x) => s + x.v, 0);
+  return { parts, total, complete: known.length === parts.length };
+}
+function renderPnlBreakdown() {
+  const { parts, total, complete } = pnlParts();
+  const contrib = state.scope === 'all' ? (state.snap.contrib_net ?? (state.snap.history && state.snap.history.contrib ? state.snap.history.contrib[state.snap.history.contrib.length - 1] : null)) : null;
+  $('k-total').innerHTML = `<span class="${cls(total)}">${fmtSigned(total)}</span>` +
+    (contrib ? ` <span class="muted">(${fmtPct(total / contrib, 1)} sui versamenti)</span>` : '');
+  $('k-total').parentElement.title = complete ? 'P&L aperto + P&L chiuso + dividendi + interessi − commissioni'
+    : 'Le commissioni sono per conto, non per titolo: nella selezione di simboli sono escluse';
+  const gross = parts.reduce((s, x) => s + (x.v != null && isFinite(x.v) ? Math.abs(x.v) : 0), 0) || 1;
+  $('pnl-bar').innerHTML = parts.filter((x) => x.v != null && isFinite(x.v) && x.v !== 0)
+    .map((x) => `<span title="${x.l}: ${fmtSigned(x.v, 2)}" style="width:${(Math.abs(x.v) / gross * 100).toFixed(2)}%;background:${x.c};opacity:${x.v < 0 ? 0.55 : 1}"></span>`).join('');
+  const share = (v) => total ? (v / total * 100).toFixed(1).replace('-', '−') + '%' : '—';
+  $('pnl-items').innerHTML = parts.map((x) => {
+    const ok = x.v != null && isFinite(x.v);
+    return `<span class="it"><span class="sw" style="background:${x.c}"></span><span class="muted">${x.l}</span>
+      <span class="num ${ok ? cls(x.v) : ''}">${ok ? fmtSigned(x.v) : (x.k === 'fees' && state.scope === 'custom' ? 'non attribuibili' : '—')}</span>
+      <span class="num muted">${ok ? share(x.v) : ''}</span></span>`;
+  }).join('') + `<span class="it eq">= <b class="num ${cls(total)}">${fmtSigned(total)}</b>${complete ? '' : ' <span class="muted">(senza commissioni)</span>'}</span>`;
+}
+function updatePeriodKpi() {
+  if (!state.agg.length) { $('k-period').textContent = '—'; return; }
+  const a = state.agg[0].o, z = state.agg[state.agg.length - 1].c;
+  $('k-period').innerHTML = `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}</span>`;
+}
+
+const COLS = [
+  { k: 'sel', l: '', cls: 'l' },
+  { k: 'symbol', l: 'Simbolo', cls: 'l' },
+  { k: 'name', l: 'Nome', cls: 'l nm' },
+  { k: 'qty', l: 'Qtà' },
+  { k: 'price', l: 'Prezzo' },
+  { k: 'dayPct', l: 'Giorno' },
+  { k: 'value', l: 'Valore' },
+  { k: 'weight', l: 'Peso' },
+  { k: 'pnl', l: 'P&L aperto' },
+  { k: 'pnlPct', l: '%' },
+  { k: 'src', l: 'Fonte', cls: 'l' },
+];
+function rowData(p, scopeTotal) {
+  const market = isMarketPos(p);
+  const price = market ? priceOf(p) : null;
+  const value = market ? p.qty * price : p.value;
+  const prev = market ? prevOf(p) : null;
+  const lv = state.live[p.symbol];
+  return {
+    p, symbol: p.symbol, name: p.name, qty: market ? p.qty : null, price,
+    dayPct: market && prev ? price / prev - 1 : null, dayUsd: market && prev ? p.qty * (price - prev) : null,
+    value, weight: scopeTotal && inScopeNow(p) ? value / scopeTotal : null, pnl: value - p.cost, pnlPct: p.cost ? value / p.cost - 1 : null,
+    src: !market ? 'fisso' : lv ? lv.src : 'snapshot', dir: lv ? lv.dir : 0,
+    mk: marketStatus(p.kind),
+  };
+}
+function renderTable() {
+  renderClosed();
+  const showAll = state.scope === 'custom';
+  const list = showAll ? positions() : scopePositions();
+  const visible = list.filter((p) => isMarketPos(p) || staticIncluded() || showAll);
+  const scopeTotal = scopePositions().reduce((s, p) => s + (isMarketPos(p) ? p.qty * priceOf(p) : (staticIncluded() ? p.value : 0)), 0);
+  const rows = visible.map((p) => rowData(p, scopeTotal));
+  const k = state.sortKey, dir = state.sortDir;
+  rows.sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (typeof x === 'string' || typeof y === 'string') return dir * String(x).localeCompare(String(y));
+    return dir * ((x ?? -Infinity) - (y ?? -Infinity));
+  });
+  $('thead').innerHTML = COLS.map((c) => `<th class="${c.cls || ''}" data-k="${c.k}">${c.l}${state.sortKey === c.k ? (state.sortDir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join('');
+  $('tbody').innerHTML = rows.map((r) => {
+    const sel = state.scope === 'custom' ? `<input type="checkbox" data-sym="${r.symbol}" ${state.custom.has(r.symbol) ? 'checked' : ''}>` : '';
+    const srcLbl = { live: 'live', poll: 'Yahoo', snapshot: 'snapshot', fisso: 'fisso' }[r.src] || r.src;
+    return `<tr data-row="${r.symbol}">
+      <td class="l">${sel}</td>
+      <td class="l sym" data-solo="${r.symbol}" title="Mostra solo questo simbolo"><span class="mk ${r.mk.open === true ? 'open' : r.mk.open === false ? 'closed' : ''}" title="${r.mk.label}"></span>${r.symbol}</td>
+      <td class="l nm" title="${r.name}">${r.name}</td>
+      <td class="num">${fmtQty(r.qty)}</td>
+      <td class="num" data-price="${r.symbol}">${r.price == null ? '—' : fmtPrice(r.price)}</td>
+      <td class="num ${cls(r.dayPct)}" title="${r.dayUsd == null ? '' : fmtSigned(r.dayUsd, 2)}">${r.dayPct == null ? '—' : fmtPct(r.dayPct)}</td>
+      <td class="num">${fmtUsd(r.value)}</td>
+      <td class="num">${r.weight == null ? '—' : (r.weight * 100).toFixed(1) + '%'}</td>
+      <td class="num ${cls(r.pnl)}">${fmtSigned(r.pnl)}</td>
+      <td class="num ${cls(r.pnlPct)}">${r.pnlPct == null ? '—' : fmtPct(r.pnlPct, 1)}</td>
+      <td class="l"><span class="src ${r.src}">${srcLbl}</span></td></tr>`;
+  }).join('');
+  const tv = rows.filter((r) => !showAll || state.custom.has(r.symbol));
+  const sum = (f) => tv.reduce((s, r) => s + (r[f] || 0), 0);
+  $('tfoot').innerHTML = `<tr><td></td><td class="l"><b>Totale</b></td><td class="nm"></td><td></td><td></td>
+    <td class="num ${cls(sum('dayUsd'))}">${fmtSigned(sum('dayUsd'))}</td><td class="num"><b>${fmtUsd(sum('value'))}</b></td><td></td>
+    <td class="num ${cls(sum('pnl'))}">${fmtSigned(sum('pnl'))}</td><td></td><td></td></tr>`;
+}
+/** Cheap in-place refresh of prices for the symbols that ticked, with a flash. */
+function flashPrices(syms) {
+  for (const s of syms) {
+    const cell = document.querySelector(`[data-price="${CSS.escape(s)}"]`);
+    if (!cell) continue;
+    const lv = state.live[s];
+    cell.classList.remove('flash-up', 'flash-down');
+    void cell.offsetWidth;
+    if (lv && lv.dir) cell.classList.add(lv.dir > 0 ? 'flash-up' : 'flash-down');
+  }
+}
+
+/* ------------------------------------------------------------------ render loop */
+const dirty = { table: new Set(), chart: false };
+let flushPending = false, lastTableRender = 0;
+function scheduleFlush() {
+  if (flushPending) return;
+  flushPending = true;
+  setTimeout(() => {
+    flushPending = false;
+    if (dirty.chart) { dirty.chart = false; applyLiveToChart(); }
+    updateKpis();
+    if (dirty.table.size && Date.now() - lastTableRender > 1000) {
+      const syms = [...dirty.table]; dirty.table.clear();
+      lastTableRender = Date.now();
+      renderTable(); flashPrices(syms);
+    } else if (dirty.table.size) scheduleFlush();
+  }, 250);
+}
+
+/* ------------------------------------------------------------------ toolbar */
+function renderSeg(id, items, current, onPick) {
+  const el = $(id);
+  el.innerHTML = items.map(([v, l]) => `<button data-v="${v}" class="${String(v) === String(current) ? 'on' : ''}">${l}</button>`).join('');
+  el.onclick = (e) => { const b = e.target.closest('button'); if (b) onPick(b.dataset.v); };
+}
+function markSeg(id, current) { for (const b of $(id).querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === String(current)); }
+function renderToolbar() {
+  markSeg('seg-scope', state.scope);
+  renderSeg('seg-interval', Object.keys(INTERVALS).map((k) => [k, INTERVAL_LABEL[k]]), state.interval, (v) => {
+    state.interval = v; store.set('interval', v);
+    if (INTERVALS[v].intraday && state.valueMode === 'real') { state.valueMode = 'positions'; store.set('valueMode', 'positions'); }
+    if (!rangesFor(v).includes(state.range)) state.range = INTERVALS[v].def;
+    store.set('range', state.range); renderToolbar(); rebuild(true);
+  });
+  if (!rangesFor(state.interval).includes(state.range)) { state.range = INTERVALS[state.interval].def; store.set('range', state.range); }
+  renderSeg('seg-range', rangesFor(state.interval).map((r) => [r, RANGE_LABEL[r]]), state.range, (v) => {
+    state.range = v; store.set('range', v); renderToolbar(); rebuild(true);
+  });
+  markSeg('seg-type', state.chartType);
+  markSeg('seg-scale', state.scaleMode);
+  $('opt-static').checked = state.includeStatic;
+  $('opt-static').disabled = state.scope === 'crypto';
+  markSeg('seg-mode', state.valueMode);
+  const why = realReason();
+  for (const b of $('seg-mode').querySelectorAll('button')) b.style.opacity = b.dataset.v === 'real' && why ? 0.45 : 1;
+  $('seg-mode').title = why ? `Storico reale non disponibile: ${why}.` : $('seg-mode').getAttribute('title');
+  const contribOk = realActive() && state.scope === 'all';
+  $('opt-contrib').checked = state.showContrib;
+  $('opt-contrib').disabled = !contribOk;
+  $('lbl-contrib').style.display = state.valueMode === 'real' ? '' : 'none';
+  $('lbl-contrib').style.opacity = contribOk ? 1 : 0.4;
+  $('opt-static').disabled = state.scope === 'crypto' || realActive();
+  renderPicker();
+}
+function renderPicker() {
+  const pk = $('picker');
+  pk.classList.toggle('show', state.scope === 'custom');
+  if (state.scope !== 'custom') return;
+  const chips = positions().map((p) => `<span class="chip ${state.custom.has(p.symbol) ? 'on' : ''}" data-chip="${p.symbol}">${p.symbol}</span>`);
+  const acts = [['all', 'Tutti'], ['none', 'Nessuno'], ['equity', 'Azioni ed ETF'], ['fund', 'Fondi comuni'], ['crypto', 'Crypto'], ['static', 'CD e liquidità']]
+    .map(([k, l]) => `<span class="chip act" data-act="${k}">${l}</span>`);
+  pk.innerHTML = acts.join('') + '<span class="sep"></span>' + chips.join('');
+}
+$('picker').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-chip]'), a = e.target.closest('[data-act]');
+  if (c) { const s = c.dataset.chip; state.custom.has(s) ? state.custom.delete(s) : state.custom.add(s); }
+  else if (a) {
+    const k = a.dataset.act;
+    if (k === 'none') state.custom.clear();
+    else for (const p of positions()) if (k === 'all' ? isMarketPos(p) : p.kind === k) state.custom.add(p.symbol);
+  } else return;
+  saveCustom(); renderPicker(); renderTable(); updateKpis(); rebuildDebounced();
+});
+function saveCustom() { store.set('custom', [...state.custom]); }
+let rebuildTimer = null;
+function rebuildDebounced() { clearTimeout(rebuildTimer); rebuildTimer = setTimeout(() => rebuild(true), 350); }
+
+$('seg-scope').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.scope = b.dataset.v; store.set('scope', state.scope);
+  if (state.scope === 'custom' && state.valueMode === 'real') { state.valueMode = 'positions'; store.set('valueMode', 'positions'); }
+  if (state.scope === 'custom' && !state.custom.size) for (const p of positions()) if (isMarketPos(p)) state.custom.add(p.symbol);
+  renderToolbar(); renderTable(); updateKpis(); rebuild(true);
+};
+$('seg-type').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.chartType = b.dataset.v; store.set('chartType', state.chartType); markSeg('seg-type', state.chartType); renderSeries(false);
+};
+$('seg-scale').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.scaleMode = +b.dataset.v; store.set('scaleMode', state.scaleMode); markSeg('seg-scale', state.scaleMode);
+  chart.priceScale('right').applyOptions({ mode: state.scaleMode });
+};
+$('opt-static').onchange = (e) => { state.includeStatic = e.target.checked; store.set('includeStatic', state.includeStatic); renderTable(); updateKpis(); rebuild(false); };
+$('opt-contrib').onchange = (e) => { state.showContrib = e.target.checked; store.set('showContrib', state.showContrib); renderRealOverlay(); };
+$('seg-mode').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.valueMode = b.dataset.v; store.set('valueMode', state.valueMode);
+  if (state.valueMode === 'real') {
+    // The real history is daily: move to a daily view and a scope that has it.
+    if (INTERVALS[state.interval].intraday) { state.interval = '1D'; state.range = INTERVALS['1D'].def; store.set('interval', '1D'); store.set('range', state.range); }
+    if (state.scope === 'custom') { state.scope = 'all'; store.set('scope', 'all'); renderTable(); updateKpis(); }
+    const why = realReason();
+    if (why) { const bn = $('banner'); bn.innerHTML = `Storico reale non disponibile: ${why}.`; bn.classList.add('show'); }
+  }
+  renderToolbar(); rebuild(true);
+};
+
+$('thead').addEventListener('click', (e) => {
+  const th = e.target.closest('th'); if (!th || th.dataset.k === 'sel') return;
+  if (state.sortKey === th.dataset.k) state.sortDir *= -1; else { state.sortKey = th.dataset.k; state.sortDir = ['symbol', 'name', 'src'].includes(th.dataset.k) ? 1 : -1; }
+  renderTable();
+});
+$('tbody').addEventListener('click', (e) => {
+  const cb = e.target.closest('input[data-sym]');
+  if (cb) { cb.checked ? state.custom.add(cb.dataset.sym) : state.custom.delete(cb.dataset.sym); saveCustom(); renderPicker(); updateKpis(); renderTable(); rebuildDebounced(); return; }
+  const solo = e.target.closest('[data-solo]');
+  if (solo) {
+    state.scope = 'custom'; state.custom = new Set([solo.dataset.solo]); saveCustom(); store.set('scope', 'custom');
+    if (state.valueMode === 'real') { state.valueMode = 'positions'; store.set('valueMode', 'positions'); }
+    renderToolbar(); renderTable(); updateKpis(); rebuild(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+});
+
+/* ------------------------------------------------------------------ settings, import, export */
+$('worker-code').value = $('worker-src').textContent.trim();
+function openSettings() {
+  $('set-proxy').value = state.settings.proxy || DEFAULT_PROXY;
+  $('set-token').value = state.settings.token || '';
+  $('set-finnhub').value = state.settings.finnhub || DEFAULT_FINNHUB;
+  $('set-poll').value = state.settings.pollSec || 30;
+  $('conn-info').textContent = BOOT.info();
+  $('snap-info').textContent = `Snapshot in uso: ${state.snap.source || state.snap.asof} · ${positions().length} posizioni` + (state.snap === embedded ? ' (dal brief, via Drive)' : ' (importato a mano)');
+  $('msg').textContent = '';
+  $('modal').classList.add('show');
+}
+const msg = (t, bad) => { $('msg').innerHTML = `<span class="${bad ? 'down' : 'up'}">${t}</span>`; };
+$('btn-settings').onclick = openSettings;
+$('btn-close').onclick = () => $('modal').classList.remove('show');
+$('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') $('modal').classList.remove('show'); });
+$('btn-save').onclick = () => {
+  state.settings = {
+    // Store only an override: the default stays in the file and follows future rebuilds.
+    proxy: normalizeProxy($('set-proxy').value) === normalizeProxy(DEFAULT_PROXY) ? '' : normalizeProxy($('set-proxy').value),
+    token: $('set-token').value.trim(),
+    finnhub: $('set-finnhub').value.trim() === DEFAULT_FINNHUB ? '' : $('set-finnhub').value.trim(),
+    pollSec: Math.max(10, +$('set-poll').value || 30),
+  };
+  store.set('settings', state.settings);
+  $('set-proxy').value = state.settings.proxy || DEFAULT_PROXY;
+  state.barCache.clear();
+  connectFinnhub(); pollYahoo(); rebuild(true);
+  msg('Impostazioni salvate.');
+};
+$('btn-test').onclick = async () => {
+  if (!$('set-proxy').value.trim()) $('set-proxy').value = DEFAULT_PROXY;
+  const saved = state.settings.token;
+  state.settings.token = $('set-token').value.trim();
+  const url = proxyUrl('/v8/finance/chart/SPY?interval=1d&range=5d', $('set-proxy').value);
+  state.settings.token = saved;
+  msg('Provo ' + url.replace(/token=[^&]+/, 'token=…') + ' …');
+  try {
+    const j = await fetchJson(url);
+    const p = j.chart.result[0].meta.regularMarketPrice;
+    msg(`Proxy funzionante: SPY ${fmtPrice(p)}. Premi "Salva e ricarica dati".`);
+  } catch (e) {
+    const hint = e.status === 403 ? 'il Worker chiede un token' : e.status === 404 ? 'il Worker non ha il codice del proxy (hai premuto Deploy dopo averlo incollato?)'
+      : e.status === 429 ? 'Yahoo sta limitando le richieste del Worker, riprova tra qualche minuto' : 'controlla l\'URL del proxy';
+    msg(`Proxy non raggiungibile (${e.message}): ${hint}.`, true);
+  }
+};
+$('btn-copy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('worker-code').value); msg('Codice copiato.'); }
+  catch { $('worker-code').select(); msg('Copia non permessa: il testo è selezionato, usa Ctrl/Cmd+C.', true); }
+};
+$('btn-export').onclick = () => {
+  const blob = new Blob([JSON.stringify(state.snap, null, 1)], { type: 'application/json' });
+  const a = $('dl'); a.href = URL.createObjectURL(blob); a.download = `portfolio_snapshot_${state.snap.asof}.json`; a.click();
+};
+$('btn-reset').onclick = () => { store.del('snapshot'); applySnapshot(embedded, false); msg('Ripristinato lo snapshot del brief.'); };
+$('set-file').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    let snap;
+    if (/\.json$/i.test(f.name)) snap = JSON.parse(await f.text());
+    else if (/\.csv$/i.test(f.name)) snap = parseDriveCsv(await f.text(), f.name);
+    else snap = await parseBriefXlsx(await f.arrayBuffer(), f.name);
+    const problems = validateSnapshot(snap);
+    if (problems.fatal) throw new Error(problems.fatal);
+    applySnapshot(snap, true);
+    msg(`Importate ${snap.positions.length} posizioni al ${snap.asof}.` + (problems.warn.length ? ` Attenzione: ${problems.warn.join('; ')}` : ''), problems.warn.length > 0);
+  } catch (err) { msg('Import non riuscito: ' + err.message, true); }
+  e.target.value = '';
+};
+function applySnapshot(snap, persist) {
+  state.snap = snap;
+  if (persist) store.set('snapshot', snap);
+  state.live = {}; state.barCache.clear();
+  for (const s of [...state.custom]) if (!bySym(s)) state.custom.delete(s);
+  saveCustom();
+  $('asof').textContent = `posizioni al ${snap.asof}`;
+  connectCoinbase(); connectFinnhub(); pollYahoo();
+  renderToolbar(); renderTable(); updateKpis(); rebuild(true);
+}
+function validateSnapshot(s) {
+  if (!s || !Array.isArray(s.positions) || !s.positions.length) return { fatal: 'nessuna posizione trovata', warn: [] };
+  const warn = [];
+  let bad = 0;
+  for (const p of s.positions) {
+    if (!p.symbol || !isFinite(p.value)) { bad++; continue; }
+    if (p.kind !== 'static' && (!isFinite(p.qty) || !isFinite(p.price) || Math.abs(p.qty * p.price - p.value) > Math.max(2, 0.02 * Math.abs(p.value)))) bad++;
+  }
+  if (bad > s.positions.length / 3) return { fatal: `${bad} righe con quantità × prezzo diverso dal valore: i numeri sembrano corrotti (succede con il Google Sheet convertito da Drive). Usa l'XLSX del brief.`, warn };
+  if (bad) warn.push(`${bad} righe incoerenti`);
+  return { warn };
+}
+
+/** Classify a position from the brief's class label and ticker shape. */
+function kindOf(symbol, klass) {
+  if (/crypto/i.test(klass || '')) return 'crypto';
+  if (/liquidit|cd\b/i.test(klass || '') || /^CASH$|^Sweep$/i.test(symbol) || /^[0-9]{5}[A-Z0-9]{4}$/.test(symbol)) return 'static';
+  if (/^[A-Z]{4}X$/.test(symbol)) return 'fund'; // US mutual fund tickers: five letters ending in X
+  return 'equity';
+}
+function buildPosition(r) {
+  const kind = kindOf(r.symbol, r.cls);
+  const qty = +r.qty, price = +r.price, value = +r.value, cost = +r.cost, day = +r.day || 0;
+  return {
+    symbol: r.symbol === 'CASH' ? 'Sweep' : r.symbol, name: r.name || r.symbol, cls: r.cls || '', account: r.account || '', kind,
+    qty: kind === 'static' ? (isFinite(qty) ? qty : null) : qty, price: isFinite(price) ? price : null,
+    prev: kind !== 'static' && qty ? price - day / qty : null, value, cost: isFinite(cost) ? cost : value,
+  };
+}
+const headerIndex = (hdr, names) => { for (const n of names) { const i = hdr.findIndex((h) => String(h).trim().toLowerCase() === n.toLowerCase()); if (i >= 0) return i; } return -1; };
+function rowsToPositions(hdr, rows) {
+  const ix = {
+    symbol: headerIndex(hdr, ['Simbolo']), name: headerIndex(hdr, ['Nome']), cls: headerIndex(hdr, ['Classe']), account: headerIndex(hdr, ['Conto']),
+    qty: headerIndex(hdr, ['Qtà']), price: headerIndex(hdr, ['Prezzo']), value: headerIndex(hdr, ['Valore']), cost: headerIndex(hdr, ['Costo']), day: headerIndex(hdr, ['Giorno $']),
+  };
+  if (ix.symbol < 0 || ix.value < 0) throw new Error('colonne Simbolo/Valore non trovate');
+  const num = (v) => {
+    if (typeof v === 'number') return v;
+    if (v == null || v === '') return NaN;
+    let t = String(v).trim().replace(/[$\s]/g, '');
+    const frac = t.match(/^=(-?\d+)\/(\d+)$/); // drive_export >= 0.3.14 writes "=16834338/100"
+    if (frac) return +frac[1] / +frac[2];
+    if (t.includes(',') && !t.includes('.')) t = t.replace(',', '.'); // decimal comma (Drive export, Italian locale)
+    else t = t.replace(/,/g, '');
+    return +t;
+  };
+  return rows.filter((r) => r && r[ix.symbol]).map((r) => buildPosition({
+    symbol: String(r[ix.symbol]).trim(), name: r[ix.name], cls: r[ix.cls], account: r[ix.account],
+    qty: num(r[ix.qty]), price: num(r[ix.price]), value: num(r[ix.value]), cost: num(r[ix.cost]), day: num(r[ix.day]),
+  }));
+}
+function historyFromRows(hdr, rows) {
+  const d = headerIndex(hdr, ['Data']), v = headerIndex(hdr, ['Valore del portafoglio']), c = headerIndex(hdr, ['Contributi netti']), a = headerIndex(hdr, ['Broker']);
+  if (d < 0 || v < 0) return null;
+  const toIso = (x) => x instanceof Date ? x.toISOString().slice(0, 10) : String(x).slice(0, 10);
+  const num = (x) => { if (typeof x === 'number') return x; const m = String(x ?? '').match(/^=(-?\d+)\/(\d+)$/); if (m) return +m[1] / +m[2]; const t = String(x ?? '').replace(',', '.'); return t === '' ? NaN : +t; };
+  const out = { dates: [], value: [], contrib: [], broker: a >= 0 ? [] : undefined };
+  for (const r of rows) {
+    if (!r || r[d] == null || !isFinite(num(r[v]))) continue;
+    out.dates.push(toIso(r[d])); out.value.push(num(r[v])); out.contrib.push(c >= 0 ? num(r[c]) : NaN);
+    if (a >= 0) out.broker.push(num(r[a]));
+  }
+  if (!out.broker) delete out.broker;
+  return out.dates.length ? out : null;
+}
+/** Parse a number written by the brief: plain, "=a/b" (Drive-safe) or with a decimal comma. */
+function parseBriefNum(x) {
+  if (typeof x === 'number') return x;
+  const t = String(x ?? '').trim().replace(/[$\s]/g, '');
+  if (!t) return NaN;
+  const m = t.match(/^=(-?\d+)\/(\d+)$/);
+  if (m) return +m[1] / +m[2];
+  if (t.includes(',') && !t.includes('.')) return +t.replace(',', '.');
+  return +t.replace(/,/g, '');
+}
+function closedFromRows(hdr, rows) {
+  const ix = { s: headerIndex(hdr, ['Simbolo']), q: headerIndex(hdr, ['Qtà']), pr: headerIndex(hdr, ['Incassi']), c: headerIndex(hdr, ['Costo']),
+               p: headerIndex(hdr, ['P&L']), d: headerIndex(hdr, ['Dividendi']), i: headerIndex(hdr, ['Interessi']), l: headerIndex(hdr, ['Ultima uscita']),
+               h: headerIndex(hdr, ['Ancora detenuto']) };
+  if (ix.s < 0 || ix.p < 0) return undefined;
+  return rows.filter((r) => r && r[ix.s]).map((r) => {
+    const held = (ix.h >= 0 && /^(s[iì]|yes|true|1)$/i.test(String(r[ix.h] ?? ''))) || /in posizioni/i.test(String(r[ix.d] ?? ''));
+    const last = r[ix.l] instanceof Date ? r[ix.l].toISOString().slice(0, 10) : String(r[ix.l] ?? '').slice(0, 10);
+    return { symbol: String(r[ix.s]).trim(), qty: parseBriefNum(r[ix.q]), proceeds: parseBriefNum(r[ix.pr]), cost: parseBriefNum(r[ix.c]),
+             pnl: parseBriefNum(r[ix.p]), dividends: held ? null : (parseBriefNum(r[ix.d]) || 0), interest: held ? null : (parseBriefNum(r[ix.i]) || 0), held, last };
+  });
+}
+/** Income, fees and net contributions from the brief's summary table (XLSX "Riepilogo" or CSV "## Riepilogo"). */
+function incomeFromSummary(rows) {
+  const d = summaryValue(rows, 'Dividendi (incluse distribuzioni di plusvalenze)');
+  const i = summaryValue(rows, 'Interessi (inclusi maturati sui CD)');
+  const f = summaryValue(rows, 'Commissioni (al netto delle retrocessioni)');
+  const c = summaryValue(rows, 'Contributi netti');
+  const out = {};
+  if (d != null && i != null && f != null) out.income = { dividends: d, interest: i, fees: Math.abs(f) };
+  if (c != null) out.contrib_net = c;
+  return out;
+}
+function summaryValue(rows, label) {
+  const row = rows.find((r) => r && String(r[0]).trim() === label);
+  const v = row ? parseBriefNum(row[1]) : NaN;
+  return isFinite(v) ? v : undefined;
+}
+const dateFromName = (name) => (name.match(/(\d{4}-\d{2}-\d{2})/) || [])[1] || new Date().toISOString().slice(0, 10);
+
+async function loadSheetJs() {
+  if (window.XLSX) return window.XLSX;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('impossibile caricare il lettore XLSX (serve internet)'));
+    document.head.appendChild(s);
+  });
+  return window.XLSX;
+}
+async function parseBriefXlsx(buf, name) {
+  const XLSX = await loadSheetJs();
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const sheet = (n) => wb.Sheets[n] ? XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true }) : null;
+  const pos = sheet('Posizioni');
+  if (!pos) throw new Error('foglio "Posizioni" non trovato');
+  const positionsArr = rowsToPositions(pos[0], pos.slice(1));
+  const hs = sheet('Serie storica');
+  const history = hs ? historyFromRows(hs[0], hs.slice(1)) : null;
+  const ch = sheet('Chiuse');
+  const rs = sheet('Riepilogo');
+  return { asof: dateFromName(name), source: `Import ${name}`, positions: positionsArr, history: history || state.snap.history,
+           closed: ch ? closedFromRows(ch[0], ch.slice(1)) : undefined, realized: rs ? summaryValue(rs, 'P&L chiuso') : undefined,
+           ...(rs ? incomeFromSummary(rs) : {}) };
+}
+/** CSV written by drive_export.py: stacked sections, each under a "## Title" row. */
+function parseDriveCsv(text, name) {
+  const rows = parseCsv(text);
+  const section = (title) => {
+    const i = rows.findIndex((r) => r[0] && r[0].startsWith('## ' + title));
+    if (i < 0) return null;
+    const hdr = rows[i + 1]; const body = [];
+    for (let j = i + 2; j < rows.length && rows[j].some((c) => c !== ''); j++) body.push(rows[j]);
+    return { hdr, body };
+  };
+  const p = section('Posizioni');
+  if (!p) throw new Error('sezione "## Posizioni" non trovata');
+  const h = section('Serie storica');
+  const c = section('Posizioni chiuse');
+  const r = section('Riepilogo');
+  const asofRow = rows[0] && rows[0][2] ? rows[0][2].replace(/^al\s*/, '') : dateFromName(name);
+  return { asof: asofRow, source: `Import ${name}`, positions: rowsToPositions(p.hdr, p.body), history: (h && historyFromRows(h.hdr, h.body)) || state.snap.history,
+           closed: c ? closedFromRows(c.hdr, c.body) : undefined, realized: r ? summaryValue([r.hdr, ...r.body], 'P&L chiuso') : undefined,
+           ...(r ? incomeFromSummary([r.hdr, ...r.body]) : {}) };
+}
+function parseCsv(text) {
+  const out = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); out.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); out.push(row); }
+  return out;
+}
+
+/* ------------------------------------------------------------------ boot */
+let lastNyseOpen = null;
+function tickClock() {
+  $('clock').textContent = new Date().toLocaleTimeString('it-IT');
+  if (dayRef.day != null && dayRef.day !== localMidnight()) { ensureDay(); updateKpis(); renderTable(); rebuild(false); }
+  const st = marketStatus('equity');
+  $('nyse-dot').className = 'mk ' + (st.open ? 'open' : 'closed');
+  $('nyse-txt').textContent = st.open ? 'NYSE aperta' : 'NYSE chiusa';
+  $('pill-nyse').title = st.label;
+  if (lastNyseOpen !== null && lastNyseOpen !== st.open) renderTable(); // flip the table dots at the bell
+  lastNyseOpen = st.open;
+}
+tickClock();
+setInterval(tickClock, 1000);
+// Roll the last bar even when no tick arrives (keeps the time axis honest for idle scopes).
+setInterval(() => { if (scopePositions().some((p) => p.kind === 'crypto')) { dirty.chart = true; scheduleFlush(); } }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollYahoo(); if (!cbWs || cbWs.readyState > 1) connectCoinbase(); } });
+
+$('asof').textContent = `posizioni al ${state.snap.asof}`;
+let embeddedPreview = false;
+try { embeddedPreview = window.self !== window.top; } catch { embeddedPreview = true; }
+if (embeddedPreview) {
+  const b = $('banner');
+  b.innerHTML = '<b>Stai guardando un\'anteprima.</b> Qui le connessioni ai prezzi sono bloccate: scarica il file e aprilo dal computer con Chrome (doppio clic).';
+  b.classList.add('show');
+}
+renderToolbar();
+renderTable();
+updateKpis();
+refreshStocksPill();
+ensureDay();
+connectCoinbase();
+connectFinnhub();
+pollYahoo();
+loadDayRefs();
+rebuild(true);
+if (!proxyUrl('/') && !embeddedPreview) setTimeout(() => { if (!proxyUrl('/')) { const b = $('banner'); if (!b.classList.contains('show')) { b.innerHTML = 'Per i prezzi e lo storico di azioni, ETF e fondi configura il proxy Yahoo in <b>Impostazioni</b> (codice del Worker incluso). Le crypto sono già in tempo reale.'; b.classList.add('show'); } } }, 1500);
+
+/* ------------------------------------------------------------------ hooks for the loader */
+$('btn-refresh').onclick = async () => {
+  msg('Controllo lo snapshot su Drive…');
+  const r = await BOOT.refresh();
+  if (r.ok) openSettings(); // re-reads the snapshot lines; it also clears the message, so set it afterwards
+  msg(r.text, !r.ok);
+};
+$('btn-conn').onclick = () => { $('modal').classList.remove('show'); BOOT.openConnect(); };
+return {
+  /** A newer snapshot arrived from Drive: it becomes the baseline; a manual import wins only if it is newer still. */
+  applyRemote(snap) { embedded = snap; applySnapshot(pickSnapshot(), false); },
+};
+};
+</script>
+<div id="boot-msg" hidden>Caricamento delle posizioni…</div>
+
+<div id="connect">
+  <form class="card" id="connect-form" novalidate>
+    <h2>Collega lo snapshot delle posizioni</h2>
+    <div class="hint">Le posizioni non sono dentro questa pagina: arrivano dal tuo Worker Cloudflare, che legge l'ultimo snapshot scritto dal Portfolio Brief su Drive.</div>
+    <div class="field"><label for="conn-url">URL del Worker dello snapshot</label><input id="conn-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://portfolio-snapshot.tuonome.workers.dev"></div>
+    <div class="field"><label for="conn-token">Token</label><input id="conn-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div class="row"><button class="btn" id="conn-submit" type="submit">Collega</button><button class="btn sec" id="conn-cancel" type="button" hidden>Annulla</button></div>
+    <div id="connect-msg" aria-live="polite"></div>
+    <div class="hint">URL e token restano solo in questo browser, insieme a una copia dell'ultimo snapshot per aprire l'app anche senza rete.</div>
+  </form>
+</div>
+<script>
+/* Loader: connection settings, snapshot download and cache, then starts the tracker. */
+(() => {
+'use strict';
+const LS = { conn: 'pt.conn', remote: 'pt.remote' };
+const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
+const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+const el = (id) => document.getElementById(id);
+const RECHECK_MS = 10 * 60 * 1000;
+
+let conn = read(LS.conn);       // { url, token }
+let remote = read(LS.remote);   // { etag, modified, checkedAt, snap }
+let app = null;
+let busy = null;
+
+const LOCAL_PAGE = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+function cleanUrl(raw) {
+  let u = String(raw || '').trim().replace(/\/+$/, '').replace(/\/(snapshot|check)$/, '');
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try {
+    const p = new URL(u);
+    const local = LOCAL_PAGE && p.protocol === 'http:' && (p.hostname === 'localhost' || p.hostname === '127.0.0.1');
+    if (p.protocol !== 'https:' && !local) return '';
+    return p.origin + p.pathname.replace(/\/+$/, '');
+  } catch { return ''; }
+}
+const validSnap = (s) => !!s && typeof s.asof === 'string' && Array.isArray(s.positions) && s.positions.length > 0;
+const configOf = (s) => JSON.stringify((s && s.config) || {});
+const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'mai';
+
+/** @returns {Promise<{changed: boolean, snap?: object, etag?: string, modified?: number}>} */
+async function download(c, etag) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  let res;
+  try {
+    const headers = { Authorization: 'Bearer ' + c.token };
+    if (etag) headers['If-None-Match'] = etag;
+    res = await fetch(c.url + '/snapshot', { headers, cache: 'no-store', signal: ctrl.signal });
+  } catch {
+    throw { code: navigator.onLine === false ? 'offline' : 'network' };
+  } finally { clearTimeout(timer); }
+  if (res.status === 304) return { changed: false };
+  let body = null;
+  try { body = await res.json(); } catch { /* handled below */ }
+  if (!res.ok) throw { code: (body && body.error) || 'http', message: (body && body.message) || 'HTTP ' + res.status };
+  if (!validSnap(body)) throw { code: 'bad_snapshot' };
+  return { changed: true, snap: body, etag: res.headers.get('ETag') || '', modified: Date.parse(res.headers.get('Last-Modified') || '') || Date.now() };
+}
+
+function errorText(err) {
+  switch (err && err.code) {
+    case 'offline': return 'Sei offline.';
+    case 'unauthorized': return 'Token rifiutato dal Worker.';
+    case 'no_snapshot': return 'Il Worker risponde, ma nella cartella non vede ancora nessuno snapshot: arriva con il prossimo Portfolio Brief (oppure la cartella non è condivisa con il service account).';
+    case 'bad_snapshot': case 'snapshot_not_json': return 'Lo snapshot ricevuto non è valido.';
+    case 'network': return 'Worker non raggiungibile: controlla la rete e l\'URL (e ALLOWED_ORIGIN, se l\'hai impostato).';
+    default: return 'Il Worker ha risposto con un errore: ' + ((err && err.message) || (err && err.code) || 'sconosciuto') + '.';
+  }
+}
+
+function info() {
+  if (!conn) return 'Nessun collegamento: le posizioni vengono solo da file importati.';
+  if (!remote) return 'Collegato, nessuno snapshot scaricato.';
+  return `Snapshot del brief al ${remote.snap.asof}, scritto su Drive il ${fmtWhen(remote.modified)}, ultimo controllo ${fmtWhen(remote.checkedAt)}.`;
+}
+
+/** Checks Drive for a newer snapshot and applies it. Never throws. */
+function refresh() {
+  if (busy) return busy;
+  busy = (async () => {
+    if (!conn) return { ok: false, text: 'Nessun collegamento configurato.' };
+    try {
+      const r = await download(conn, remote && remote.etag);
+      if (!r.changed) {
+        remote.checkedAt = Date.now(); write(LS.remote, remote);
+        return { ok: true, text: `Nessuna novità: lo snapshot è ancora quello al ${remote.snap.asof}.` };
+      }
+      const configChanged = !!remote && configOf(remote.snap) !== configOf(r.snap);
+      remote = { etag: r.etag, modified: r.modified, checkedAt: Date.now(), snap: r.snap };
+      write(LS.remote, remote);
+      if (app && configChanged) { location.reload(); return { ok: true, text: 'Nuove impostazioni: ricarico.' }; }
+      if (app) app.applyRemote(r.snap);
+      return { ok: true, text: `Posizioni aggiornate al ${r.snap.asof}.` };
+    } catch (err) {
+      return { ok: false, text: errorText(err) };
+    }
+  })();
+  busy.finally(() => { busy = null; });
+  return busy;
+}
+
+function start() {
+  el('boot-msg').hidden = true;
+  el('connect').classList.remove('show');
+  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info });
+}
+
+function openConnect(message) {
+  const c = el('connect');
+  c.classList.toggle('over', !!app);
+  el('conn-cancel').hidden = !app;
+  el('conn-url').value = conn ? conn.url : '';
+  el('conn-token').value = '';
+  el('conn-token').placeholder = conn ? 'Lascia vuoto per tenere quello attuale' : '';
+  el('connect-msg').innerHTML = '';
+  if (message) setMsg(message, true);
+  c.classList.add('show');
+}
+function setMsg(text, bad) {
+  const s = document.createElement('span'); s.className = bad ? 'down' : 'up'; s.textContent = text;
+  el('connect-msg').replaceChildren(s);
+}
+el('conn-cancel').onclick = () => el('connect').classList.remove('show');
+el('connect-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const url = cleanUrl(el('conn-url').value);
+  const token = el('conn-token').value.trim() || (conn && conn.url === url ? conn.token : '');
+  if (!url) { setMsg('Serve un indirizzo https, ad esempio https://portfolio-snapshot.tuonome.workers.dev', true); return; }
+  if (!token) { setMsg('Inserisci il token.', true); return; }
+  const btn = el('conn-submit');
+  btn.disabled = true; btn.textContent = 'Collegamento…';
+  try {
+    const r = await download({ url, token }, '');
+    conn = { url, token }; write(LS.conn, conn);
+    const hadApp = !!app;
+    const configChanged = !!remote && configOf(remote.snap) !== configOf(r.snap);
+    remote = { etag: r.etag, modified: r.modified, checkedAt: Date.now(), snap: r.snap };
+    write(LS.remote, remote);
+    if (hadApp && configChanged) { location.reload(); return; }
+    if (hadApp) { app.applyRemote(r.snap); el('connect').classList.remove('show'); } else start();
+  } catch (err) {
+    setMsg(errorText(err), true);
+  } finally { btn.disabled = false; btn.textContent = 'Collega'; }
+});
+
+// ---------- boot ----------
+if (remote && !validSnap(remote.snap)) remote = null;
+if (conn && !(typeof conn.token === 'string' && cleanUrl(conn.url) === conn.url)) conn = null;
+if (remote) {
+  start();            // open at once on the cached copy, then look for a newer one
+  refresh();
+} else if (conn) {
+  el('boot-msg').hidden = false;
+  refresh().then((r) => { if (remote) start(); else { el('boot-msg').hidden = true; openConnect(r.text); } });
+} else {
+  openConnect();
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && app && conn && Date.now() - ((remote && remote.checkedAt) || 0) > RECHECK_MS) refresh();
+});
+setInterval(() => { if (!document.hidden && app && conn && Date.now() - ((remote && remote.checkedAt) || 0) > 3 * RECHECK_MS) refresh(); }, RECHECK_MS);
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+}
+})();
+</script>
+</body>
+</html>
