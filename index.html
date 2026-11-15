@@ -128,6 +128,7 @@ footer a{color:#8fb0ff}
   <div class="kpi"><div class="lbl">P&amp;L aperto</div><div class="val num" id="k-pnl">—</div></div>
   <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
   <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
+  <div class="kpi"><div class="lbl">TIR (XIRR)</div><div class="val num" id="k-irr">—</div></div>
   <div class="kpi"><div class="lbl">Nel periodo</div><div class="val num" id="k-period">—</div></div>
   <div class="kpi"><div class="lbl">Peso sul totale</div><div class="val num" id="k-weight">—</div></div>
 </section>
@@ -1254,6 +1255,7 @@ function updateKpis() {
   const realized = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : null;
   $('k-closed').innerHTML = realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`;
   renderPnlBreakdown();
+  renderIrr();
   $('k-weight').textContent = total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—';
   document.title = `${fmtUsd(value)} · Portfolio Tracker`;
 }
@@ -1337,6 +1339,93 @@ function renderPnlBreakdown() {
       <span class="num ${ok ? cls(x.v) : ''}">${ok ? fmtSigned(x.v) : (x.k === 'fees' && state.scope === 'custom' ? 'non attribuibili' : '—')}</span>
       <span class="num muted">${ok ? share(x.v) : ''}</span></span>`;
   }).join('') + `<span class="it eq">= <b class="num ${cls(total)}">${fmtSigned(total)}</b>${complete ? '' : ' <span class="muted">(senza commissioni)</span>'}</span>`;
+}
+/* ------------------------------------------------------------------ money-weighted return (XIRR) */
+const DAY_MS = 86400000;
+const YEAR_DAYS = 365.25; // same year length as the brief's xirr()
+const isoDayMs = (iso) => Date.parse(String(iso).slice(0, 10) + 'T00:00:00Z');
+/**
+ * Annual rate r that makes the present value of the cash flows zero:
+ *   sum_i a_i / (1 + r)^(years from the first flow to flow i) = 0
+ * cfs: [{ t: epoch ms, a: amount }] from the investor's view (money put in < 0, value today > 0).
+ * Bisection on [-99%, +500%] like the brief; null when the NPV does not change sign there.
+ */
+function xirr(cfs) {
+  if (cfs.length < 2) return null;
+  const t0 = cfs.reduce((m, c) => Math.min(m, c.t), Infinity);
+  const npv = (r) => cfs.reduce((s, c) => s + c.a / Math.pow(1 + r, (c.t - t0) / DAY_MS / YEAR_DAYS), 0);
+  let lo = -0.99, hi = 5, fLo = npv(lo);
+  if (!isFinite(fLo) || fLo * npv(hi) > 0) return null;
+  for (let i = 0; i < 100 && hi - lo > 1e-9; i++) {
+    const mid = (lo + hi) / 2, fMid = npv(mid);
+    if (fLo * fMid <= 0) hi = mid; else { lo = mid; fLo = fMid; }
+  }
+  return (lo + hi) / 2;
+}
+/**
+ * External flows of the current view, money in > 0: { list: [{ d: 'YYYY-MM-DD', a }], src } or { why }.
+ * The brief (0.8.0+) sends them per account; older snapshots only have the cumulative net
+ * contributions of the whole portfolio, whose day-by-day changes are the same flows moved to trading days.
+ */
+function scopeFlows() {
+  if (state.scope === 'custom') return { why: 'I flussi di cassa sono per conto, non per titolo: il TIR di una selezione di simboli non è calcolabile' };
+  const f = state.snap.flows;
+  if (f) {
+    const am = (f.broker || []).map(([d, a]) => ({ d, a }));
+    const cr = (f.crypto || []).map(([d, , a]) => ({ d, a }));
+    return { list: state.scope === 'broker' ? am : state.scope === 'crypto' ? cr : am.concat(cr), src: 'flussi del Portfolio Brief' };
+  }
+  const h = state.snap.history;
+  if (state.scope === 'all' && h && h.contrib && h.contrib.length) {
+    const list = [];
+    let prev = 0;
+    h.dates.forEach((d, i) => {
+      const c = h.contrib[i];
+      if (c == null || !isFinite(c)) return;
+      if (Math.abs(c - prev) >= 0.005) list.push({ d, a: c - prev });
+      prev = c;
+    });
+    return { list, src: 'variazioni dei contributi netti nella serie storica' };
+  }
+  return { why: 'Questo snapshot non ha i flussi per conto: arrivano con il Portfolio Brief 0.8.0' };
+}
+/** Live XIRR of the current view: every external flow on its date, today's value (cash and CDs included) as the final inflow. */
+function irrStats() {
+  const sf = scopeFlows();
+  if (!sf.list || !sf.list.length) return { why: sf.why || 'Nessun flusso di cassa in questa vista' };
+  let value = 0;
+  for (const p of scopePositions()) value += isMarketPos(p) ? p.qty * priceOf(p) : p.value;
+  const now = Date.now();
+  const cfs = sf.list.map((x) => ({ t: isoDayMs(x.d), a: -x.a })).filter((c) => isFinite(c.t));
+  cfs.push({ t: now, a: value });
+  const first = sf.list.reduce((m, x) => (x.d < m ? x.d : m), sf.list[0].d);
+  return { r: xirr(cfs), first: String(first).slice(0, 10), years: (now - isoDayMs(first)) / DAY_MS / YEAR_DAYS,
+           net: sf.list.reduce((s, x) => s + x.a, 0), n: sf.list.length, value, src: sf.src };
+}
+function renderIrr() {
+  const el = $('k-irr'), box = el.parentElement;
+  const st = irrStats();
+  const m = state.snap.mwr;
+  const refKey = { all: 'total', broker: 'broker', crypto: 'crypto' }[state.scope];
+  const ref = m && refKey && m[refKey] != null && isFinite(m[refKey]) ? m[refKey] : null;
+  const refAsof = (m && m.asof) || state.snap.asof;
+  if (st.why) {
+    el.innerHTML = ref == null ? '—' : `<span class="${cls(ref)}">${fmtPct(ref)}</span><span class="muted">/anno al ${refAsof}</span>`;
+    box.title = st.why + (ref == null ? '' : `\nValore del Portfolio Brief al ${refAsof}, non aggiornato con i prezzi live`);
+    return;
+  }
+  const short = st.years < 1;
+  el.innerHTML = st.r == null ? '—'
+    : `<span class="${cls(st.r)}">${fmtPct(st.r)}</span><span class="muted">/anno${short ? ' (meno di 1 anno)' : ''}</span>` +
+      (ref == null ? '' : ` <span class="muted">· brief ${fmtPct(ref)}</span>`);
+  box.title = [
+    'Tasso interno di rendimento (money-weighted): il tasso annuo a cui versamenti e prelievi, ciascuno alla sua data, valgono oggi quanto il portafoglio. Pesa di più i periodi in cui c\'era più denaro investito.',
+    `Dal ${st.first} (${st.years.toFixed(1).replace('.', ',')} anni) · ${st.n} ${st.n === 1 ? 'flusso' : 'flussi'} · versato netto ${fmtUsd(st.net)} · valore oggi ${fmtUsd(st.value)}`,
+    'Il valore include liquidità e CD anche se nascosti. Fonte dei flussi: ' + st.src + '.',
+    ref == null ? '' : `Portfolio Brief al ${refAsof}: ${fmtPct(ref)}/anno (prezzi di chiusura di quel giorno).`,
+    short ? 'Su meno di un anno il tasso annualizzato amplifica le oscillazioni: va letto con cautela.' : '',
+    st.r == null ? 'Nessun tasso tra −99% e +500% annuo azzera i flussi.' : '',
+  ].filter(Boolean).join('\n');
 }
 function updatePeriodKpi() {
   if (!state.agg.length) { $('k-period').textContent = '—'; return; }
@@ -1719,6 +1808,9 @@ function incomeFromSummary(rows) {
   const out = {};
   if (d != null && i != null && f != null) out.income = { dividends: d, interest: i, fees: Math.abs(f) };
   if (c != null) out.contrib_net = c;
+  // the XLSX and the Drive CSV use different labels for the brief's total XIRR
+  const m = summaryValue(rows, 'MWR totale (XIRR, /anno)') ?? summaryValue(rows, 'MWR totale /anno');
+  if (m != null) out.mwr = { total: m };
   return out;
 }
 function summaryValue(rows, label) {
