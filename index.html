@@ -130,6 +130,7 @@ footer a{color:#8fb0ff}
   <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
   <div class="kpi"><div class="lbl">TIR (XIRR)</div><div class="val num" id="k-irr">—</div></div>
   <div class="kpi"><div class="lbl">TWR</div><div class="val num" id="k-twr">—</div></div>
+  <div class="kpi"><div class="lbl" id="k-bench-lbl">Benchmark (TWR)</div><div class="val num" id="k-bench">—</div></div>
   <div class="kpi"><div class="lbl">Nel periodo</div><div class="val num" id="k-period">—</div></div>
   <div class="kpi"><div class="lbl">Peso sul totale</div><div class="val num" id="k-weight">—</div></div>
 </section>
@@ -774,8 +775,24 @@ function connectFinnhub() {
 
 /* Yahoo polling through the proxy for stocks, ETFs and fund NAVs. */
 let pollTimer = null, yahooStatus = 'off', yahooErr = '';
+/** Live prices of the benchmark's tickers (not positions, so kept apart from state.live). */
+const benchLive = {};
+async function pollBenchmark() {
+  const b = state.snap.benchmark;
+  if (!b || !b.weights || !proxyUrl('/')) return;
+  const syms = Object.keys(b.weights);
+  let got = null;
+  try { got = await sparkQuotes(syms); } catch { got = {}; }
+  for (const s of syms) {
+    let q = got[s];
+    if (!q) { try { q = (await yahooChart(s, '5m', 0, 0, '1d')).meta; } catch { q = null; } }
+    if (q && isFinite(q.price) && q.price > 0) benchLive[s] = { price: q.price, t: q.t };
+  }
+  renderBench();
+}
 async function pollYahoo() {
   clearTimeout(pollTimer);
+  pollBenchmark();
   const syms = positions().filter((p) => p.kind === 'equity' || p.kind === 'fund');
   if (!proxyUrl('/') || !syms.length) { yahooStatus = 'off'; refreshStocksPill(); return; }
   const open = isUsMarketWindow();
@@ -1258,6 +1275,7 @@ function updateKpis() {
   renderPnlBreakdown();
   renderIrr();
   renderTwr();
+  renderBench();
   $('k-weight').textContent = total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—';
   document.title = `${fmtUsd(value)} · Portfolio Tracker`;
 }
@@ -1516,7 +1534,8 @@ function twrStats() {
   const years = (now - isoDayMs(b.dates[b.start])) / DAY_MS / YEAR_DAYS;
   const yearAgo = new Date(now - 365 * DAY_MS).toISOString().slice(0, 10);
   return { total: I - 1, ann: years > 0.5 ? Math.pow(I, 1 / years) - 1 : null, years, first: b.dates[b.start],
-           ytd: since(`${today.getFullYear()}-01-01`), y1: since(yearAgo), step, lastDate: b.dates[b.last] };
+           ytd: since(`${today.getFullYear()}-01-01`), y1: since(yearAgo), step, lastDate: b.dates[b.last],
+           base: b, ytdFrom: `${today.getFullYear()}-01-01`, y1From: yearAgo };
 }
 function renderTwr() {
   const el = $('k-twr'), box = el.parentElement;
@@ -1530,6 +1549,55 @@ function renderTwr() {
     `Dal ${t.first} (${t.years.toFixed(1).replace('.', ',')} anni) · YTD ${fmtPct(t.ytd, 1)} · 1 anno ${fmtPct(t.y1, 1)}`,
     `Giorno per giorno con il Dietz modificato del brief fino al ${t.lastDate}, poi un ultimo tratto con i prezzi live: ${fmtPct(t.step)}.`,
     'Il valore include liquidità e CD anche se nascosti. I titoli ricevuti in regalo contano come versamento al valore di mercato, come nel brief.',
+  ].join('\n');
+}
+/* ------------------------------------------------------------------ benchmark TWR */
+/**
+ * TWR of the brief's risk-matched benchmark over the same days as the view's TWR. The brief sends
+ * its TWR index on the history days (history.bench) and the adjusted closes of the last day; the
+ * live step is the weighted move of each ticker since then (a dividend going ex in between is missed
+ * until the next snapshot). A TWR ignores the flows, so it compares directly with the portfolio's.
+ */
+function benchStats(t) {
+  const bm = state.snap.benchmark, h = state.snap.history;
+  if (!bm || !h || !h.bench || h.bench.length !== h.dates.length) return { why: 'Il benchmark arriva con lo snapshot del Portfolio Brief 0.9.0' };
+  if (state.scope === 'crypto' || state.scope === 'custom') return { why: 'Il benchmark a pari rischio vale per il portafoglio intero e per il conto Broker' };
+  if (t.why) return { why: t.why };
+  const B = h.bench, n = B.length, b = t.base;
+  let factor = 0, live = true;
+  for (const [sym, w] of Object.entries(bm.weights)) {
+    const p0 = bm.last_px && bm.last_px[sym], q = benchLive[sym];
+    if (!p0) return { why: 'Prezzi del benchmark mancanti nello snapshot' };
+    if (!q) live = false;
+    factor += w * (q ? q.price / p0 : 1);
+  }
+  const I = B[n - 1] * factor;
+  const since = (iso) => {
+    let i = firstOnOrAfter(b.dates, iso) - 1;
+    while (i >= 0 && b.idx[i] == null) i--;
+    return i >= b.start && B[i] ? I / B[i] - 1 : null;
+  };
+  const total = I / B[b.start] - 1;
+  return { total, ann: t.years > 0.5 ? Math.pow(1 + total, 1 / t.years) - 1 : null, ytd: since(t.ytdFrom), y1: since(t.y1From),
+           step: factor - 1, live, name: bm.name, tickers: Object.keys(bm.weights).join(', '), vol: bm.vol, asof: bm.asof };
+}
+function renderBench() {
+  const el = $('k-bench'), box = el.parentElement;
+  const t = twrStats(), k = benchStats(t);
+  const bm = state.snap.benchmark;
+  $('k-bench-lbl').textContent = bm && bm.weights ? `Benchmark ${Object.keys(bm.weights).join('+')} (TWR)` : 'Benchmark (TWR)';
+  if (k.why) { el.textContent = '—'; box.title = k.why; return; }
+  const pt = (x) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + ' pt';
+  const diff = t.ann != null && k.ann != null ? t.ann - k.ann : t.total - k.total;
+  el.innerHTML = (k.ann == null
+    ? `<span class="${cls(k.total)}">${fmtPct(k.total)}</span><span class="muted"> totale</span>`
+    : `<span class="${cls(k.ann)}">${fmtPct(k.ann)}</span><span class="muted">/anno · ${fmtPct(k.total, 1)} totale</span>`) +
+    ` <span class="muted">·</span> <span class="${cls(diff)}">${pt(diff)}</span>`;
+  box.title = [
+    `${k.name}: il benchmark a pari rischio scelto dal Portfolio Brief${k.vol != null ? ` (volatilità a 3 anni ${fmtPct(k.vol, 1).replace('+', '')})` : ''}. Dividendi reinvestiti, nessuna commissione di consulenza.`,
+    `Stesso periodo del TWR, dal ${t.first}. Lo scarto colorato è il TWR ${t.ann != null && k.ann != null ? 'annuo ' : ''}della vista meno quello del benchmark: positivo vuol dire che la gestione ha battuto un ETF passivo con rischio simile.`,
+    `YTD: vista ${fmtPct(t.ytd, 1)}, benchmark ${fmtPct(k.ytd, 1)} · 1 anno: vista ${fmtPct(t.y1, 1)}, benchmark ${fmtPct(k.y1, 1)}`,
+    `Indice del brief fino al ${k.asof}, poi ${k.live ? 'prezzo live di ' + k.tickers : 'ultimo prezzo dello snapshot (prezzo live non ancora arrivato)'}: ${fmtPct(k.step)}.`,
   ].join('\n');
 }
 function updatePeriodKpi() {
