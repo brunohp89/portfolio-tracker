@@ -317,7 +317,7 @@ const INTERVALS = {
   '15m': { sec: 900,    base: '15m', ranges: ['5D', '1M', '2M'],             def: '5D', intraday: true },
   '1h':  { sec: 3600,   base: '1h',  ranges: ['1M', '3M', '6M'],             def: '3M', intraday: true },
   '4h':  { sec: 14400,  base: '1h',  ranges: ['3M', '6M'],                   def: '6M', intraday: true },
-  '1D':  { sec: 86400,  base: '1d',  ranges: ['6M', '1Y', '2Y', '5Y', 'MAX'], def: '1Y', intraday: false },
+  '1D':  { sec: 86400,  base: '1d',  ranges: ['3M', '6M', '1Y', '2Y', '5Y', 'MAX'], def: '3M', intraday: false },
   '1W':  { sec: 604800, base: '1d',  ranges: ['1Y', '2Y', '5Y', 'MAX'],      def: '5Y', intraday: false },
 };
 const INTERVAL_LABEL = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1D': '1G', '1W': '1S' };
@@ -345,12 +345,21 @@ const SCOPE_LABEL = { all: 'Valore portafoglio', broker: 'Valore Broker', crypto
 
 /* ------------------------------------------------------------------ state */
 let embedded = BOOT.snapshot; // latest snapshot from Drive, replaced by applyRemote()
+/*
+ * Saved view preferences from before the current defaults: start once from the new defaults
+ * (daily candles over the last 3 months), then keep whatever is chosen afterwards.
+ */
+const DEFAULTS_VERSION = 2;
+if (store.get('defaultsVersion', 1) < DEFAULTS_VERSION) {
+  store.set('interval', '1D'); store.set('range', '3M'); store.set('chartType', 'candle');
+  store.set('defaultsVersion', DEFAULTS_VERSION);
+}
 const state = {
   snap: pickSnapshot(),
   settings: Object.assign({ proxy: '', token: '', finnhub: '', pollSec: 30 }, store.get('settings', {})),
   scope: store.get('scope', 'all'),
   custom: new Set(store.get('custom', [])),
-  interval: store.get('interval', '15m'),
+  interval: store.get('interval', '1D'),
   range: store.get('range', null),
   chartType: store.get('chartType', 'candle'),
   scaleMode: store.get('scaleMode', 0),
@@ -365,7 +374,7 @@ const state = {
   chartTimes: [],      // chart time of each aggregated bar (local-time shifted, strictly increasing)
   aggMeta: null,       // { syms, staticValue, startValue }
   buildSeq: 0,
-  sortKey: 'value', sortDir: -1,
+  sortKey: 'dayPct', sortDir: -1, // best day first
   status: { crypto: 'off', stocks: 'off' },
 };
 if (!INTERVALS[state.interval]) state.interval = '1h';
