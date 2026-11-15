@@ -58,6 +58,8 @@ header .asof{color:var(--muted)}
 #flowlines .fl span{position:absolute;bottom:2px;left:3px;font-size:10px;font-family:var(--mono);color:#26a69a;white-space:nowrap;background:rgba(15,19,28,.75);padding:0 3px;border-radius:2px}
 #flowlines .fl.out span{color:#ef5350}
 #flowlines .fl.op{border-left:1px dotted rgba(240,180,41,.5)}
+#flowlines .exact{position:absolute;top:0;background:rgba(41,98,255,.09);border-left:1px solid rgba(41,98,255,.45)}
+#flowlines .exact span{position:absolute;top:6px;right:8px;font-size:10px;color:#8fb0ff;white-space:nowrap;background:rgba(15,19,28,.75);padding:1px 5px;border-radius:3px}
 #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
 #overlay.show{display:flex}
 #banner{display:none;padding:7px 16px;background:#2a2410;color:#e8d49a;border-bottom:1px solid #4a3f17;font-size:12px}
@@ -1102,8 +1104,9 @@ function drawFlowLines() {
   cancelAnimationFrame(flowRaf);
   flowRaf = requestAnimationFrame(() => {
     const box = $('flowlines');
-    if (!flowBars.size) { box.innerHTML = ''; return; }
     const ts = chart.timeScale(), w = ts.width(), axisH = ts.height();
+    const shade = exactShade(ts, w, axisH);
+    if (!flowBars.size) { box.innerHTML = shade; return; }
     const pts = [];
     for (const [j, g] of flowBars) {
       const x = ts.timeToCoordinate(state.chartTimes[j]);
@@ -1115,13 +1118,38 @@ function drawFlowLines() {
     for (const p of [...pts].filter((q) => q.g.items.length).sort((a, b) => Math.abs(b.g.net) - Math.abs(a.g.net))) {
       if (placed.every((x) => Math.abs(x - p.x) >= 44)) { p.label = true; placed.push(p.x); }
     }
-    let html = '';
+    let html = shade;
     for (const { x, g, label } of pts) {
       const kind = !g.items.length ? ' op' : g.net < 0 ? ' out' : ''; // a day with a flow is drawn as a flow
       html += `<div class="fl${kind}" style="left:${x}px;bottom:${axisH}px">${label ? `<span>${fmtK(g.net)}</span>` : ''}</div>`;
     }
     box.innerHTML = html;
   });
+}
+/**
+ * Current positions mode: shade the part of the chart where today's quantities were already held,
+ * from the bar of the last flow or trade of the view to the right edge. There the chart is the
+ * real value of the view; before it, it is today's portfolio priced at past prices.
+ */
+function exactShade(ts, w, axisH) {
+  if (!state.agg.length || (state.aggMeta && state.aggMeta.real)) return '';
+  const since = positionsExactSince();
+  if (!since) return '';
+  const iv = INTERVALS[state.interval];
+  const t0 = localDayTs(since), key = iv.intraday ? t0 : bucketStart(t0, iv.sec);
+  const times = state.agg.map((b) => b.t);
+  let left;
+  if (key < times[0]) left = 0; // positions unchanged over the whole history shown
+  else {
+    const j = firstOnOrAfterNum(times, key);
+    if (j >= times.length) return ''; // changed after the last bar: nothing real to shade yet
+    const x = ts.timeToCoordinate(state.chartTimes[j]);
+    if (x == null) return '';
+    left = Math.max(0, Math.round(x));
+  }
+  if (left >= w) return '';
+  const day = new Date(t0 * 1000).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' });
+  return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${day}</span></div>`;
 }
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
 chart.timeScale().subscribeSizeChange(drawFlowLines);
