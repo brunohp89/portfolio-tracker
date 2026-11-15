@@ -52,6 +52,11 @@ header .asof{color:var(--muted)}
 #chart{position:absolute;inset:0}
 #legend{position:absolute;left:12px;top:8px;z-index:3;pointer-events:none;font-size:12px;background:rgba(15,19,28,.72);padding:4px 8px;border-radius:4px}
 #legend b{font-weight:600}
+#flowlines{position:absolute;inset:0;z-index:2;pointer-events:none;overflow:hidden}
+#flowlines .fl{position:absolute;top:0;width:0;border-left:1px dashed rgba(38,166,154,.75)}
+#flowlines .fl.out{border-left-color:rgba(239,83,80,.8)}
+#flowlines .fl span{position:absolute;bottom:2px;left:3px;font-size:10px;font-family:var(--mono);color:#26a69a;white-space:nowrap;background:rgba(15,19,28,.75);padding:0 3px;border-radius:2px}
+#flowlines .fl.out span{color:#ef5350}
 #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
 #overlay.show{display:flex}
 #banner{display:none;padding:7px 16px;background:#2a2410;color:#e8d49a;border-bottom:1px solid #4a3f17;font-size:12px}
@@ -159,6 +164,7 @@ footer a{color:#8fb0ff}
     <button data-v="positions">Posizioni attuali</button><button data-v="real">Storico reale</button>
   </div>
   <label class="chk" id="lbl-contrib" title="Linea dei versamenti netti cumulati (solo Storico reale, Tutto)"><input type="checkbox" id="opt-contrib">Versamenti</label>
+  <label class="chk" id="lbl-flows" title="Linee verticali nei giorni in cui entra o esce denaro: versamenti, prelievi, titoli ricevuti, crypto in arrivo nei wallet. Con Posizioni attuali il grafico coincide con il valore vero del portafoglio solo dopo l'ultima linea, e solo se da allora non ci sono stati acquisti o vendite."><input type="checkbox" id="opt-flows">Flussi</label>
 </div>
 
 <div id="picker"></div>
@@ -166,6 +172,7 @@ footer a{color:#8fb0ff}
 <div id="chartwrap">
   <div id="legend"></div>
   <div id="chart"></div>
+  <div id="flowlines"></div>
   <div id="overlay"><span id="overlay-text">Caricamento…</span></div>
 </div>
 
@@ -346,6 +353,7 @@ const state = {
   includeStatic: store.get('includeStatic', true),
   valueMode: store.get('valueMode', 'positions'), // 'positions' | 'real'
   showContrib: store.get('showContrib', true),
+  showFlows: store.get('showFlows', true),
   live: {},            // symbol -> { price, prev, t, src }
   barCache: new Map(), // cache key -> { at, bars, meta }
   agg: [],             // aggregated bars of the current view, UTC seconds
@@ -996,9 +1004,102 @@ function renderSeries(fit) {
   chart.priceScale('right').applyOptions({ mode: +state.scaleMode });
   renderCostLine();
   renderRealOverlay();
+  renderFlowLines();
   if (fit) chart.timeScale().fitContent();
   updateLegend(null);
   updatePeriodKpi();
+}
+
+/* ------------------------------------------------------------------ money flow markers */
+/**
+ * External flows of the current view, one entry per flow: { d: 'YYYY-MM-DD', a: money in > 0, what }.
+ * Broker uses the brief's daily flows of the value history when present (they also hold
+ * securities received, at market value), plus later dated flows; crypto uses the wallet lots.
+ * A symbol selection only gets the crypto lots of its coins: Broker money lands in cash.
+ */
+function flowEvents() {
+  const f = state.snap.flows, h = state.snap.history, out = [];
+  const wantBroker = state.scope === 'all' || state.scope === 'broker';
+  const wantCrypto = state.scope !== 'broker';
+  if (!f) {
+    if (state.scope !== 'all') return out;
+    const sf = scopeFlows(); // old snapshots: changes of the cumulative net contributions
+    for (const x of sf.list || []) out.push({ d: String(x.d).slice(0, 10), a: x.a, what: 'flussi netti' });
+    return out;
+  }
+  if (wantBroker) {
+    const daily = h && h.flow_broker && h.flow_broker.length === h.dates.length;
+    const lastDay = daily ? String(h.dates[h.dates.length - 1]).slice(0, 10) : '';
+    if (daily) h.flow_broker.forEach((a, i) => { if (Math.abs(a || 0) >= 1) out.push({ d: String(h.dates[i]).slice(0, 10), a, what: 'Broker' }); });
+    for (const [d, a] of f.broker || []) if (!daily || String(d).slice(0, 10) > lastDay) out.push({ d: String(d).slice(0, 10), a, what: 'Broker' });
+  }
+  if (wantCrypto) {
+    for (const [d, sym, a] of f.crypto || []) {
+      if (state.scope === 'custom' && !state.custom.has(sym)) continue;
+      out.push({ d: String(d).slice(0, 10), a, what: sym });
+    }
+  }
+  return out;
+}
+/** Flows grouped by the chart bar they fall in: Map(bar index -> { net, items }). */
+let flowBars = new Map();
+function computeFlowBars() {
+  flowBars = new Map();
+  if (!state.showFlows || !state.agg.length) return;
+  const iv = INTERVALS[state.interval];
+  const times = state.agg.map((b) => b.t);
+  for (const e of flowEvents()) {
+    const ts = localDayTs(e.d);
+    const key = iv.intraday ? ts : bucketStart(ts, iv.sec);
+    if (key < times[0] || ts > nowSec()) continue; // before the visible history, or not happened yet
+    const j = firstOnOrAfterNum(times, key);
+    if (j >= times.length) continue;
+    const g = flowBars.get(j) || { net: 0, items: [] };
+    g.net += e.a; g.items.push(e);
+    flowBars.set(j, g);
+  }
+}
+function firstOnOrAfterNum(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+const fmtK = (v) => (v >= 0 ? '+' : '−') + (Math.abs(v) >= 1000 ? (Math.abs(v) / 1000).toFixed(Math.abs(v) >= 10000 ? 0 : 1) + 'k' : Math.abs(v).toFixed(0));
+let flowRaf = 0;
+function renderFlowLines() { computeFlowBars(); drawFlowLines(); }
+/** Positions the dashed lines on the chart; called again on every scroll, zoom and resize. */
+function drawFlowLines() {
+  cancelAnimationFrame(flowRaf);
+  flowRaf = requestAnimationFrame(() => {
+    const box = $('flowlines');
+    if (!flowBars.size) { box.innerHTML = ''; return; }
+    const ts = chart.timeScale(), w = ts.width(), axisH = ts.height();
+    const pts = [];
+    for (const [j, g] of flowBars) {
+      const x = ts.timeToCoordinate(state.chartTimes[j]);
+      if (x != null && x >= 0 && x <= w) pts.push({ x: Math.round(x), g });
+    }
+    // every line is drawn; amount labels go to the largest flows first, where there is room
+    // (the legend shows every flow of the bar under the crosshair)
+    const placed = [];
+    for (const p of [...pts].sort((a, b) => Math.abs(b.g.net) - Math.abs(a.g.net))) {
+      if (placed.every((x) => Math.abs(x - p.x) >= 44)) { p.label = true; placed.push(p.x); }
+    }
+    let html = '';
+    for (const { x, g, label } of pts) {
+      html += `<div class="fl${g.net < 0 ? ' out' : ''}" style="left:${x}px;bottom:${axisH}px">${label ? `<span>${fmtK(g.net)}</span>` : ''}</div>`;
+    }
+    box.innerHTML = html;
+  });
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
+chart.timeScale().subscribeSizeChange(drawFlowLines);
+function flowLegend(idx) {
+  const g = flowBars.get(idx);
+  if (!g) return '';
+  const label = (e) => e.what === 'Broker' ? (e.a >= 0 ? 'entrata Broker' : 'uscita Broker')
+    : e.what === 'flussi netti' ? 'flussi netti' : `${e.what} arrivati nel wallet`;
+  return '<br><span class="muted">Flussi:</span> ' + g.items.map((e) => `${label(e)} <span class="num ${cls(e.a)}">${fmtSigned(e.a)}</span> <span class="muted">(${e.d})</span>`).join(' · ');
 }
 
 /** Cumulative net contributions (dashed), shown with the real history of the whole portfolio. */
@@ -1047,7 +1148,7 @@ function updateLegend(param) {
     `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
     [k('A', b.o), k('Max', b.h), k('Min', b.l), k('C', b.c)].join(' &nbsp;') +
     ` &nbsp;<span class="num ${cls(ch)}">${fmtSigned(ch)} (${fmtPct(prev ? ch / prev : 0)})</span>` +
-    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b);
+    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + flowLegend(idx);
 }
 function soloLegend(b) {
   const p = soloPosition();
@@ -1243,6 +1344,7 @@ function applyLiveToChart() {
     const ct = Math.max(toChartTime(k), state.chartTimes[state.chartTimes.length - 1] + 1);
     state.agg.push(nb); state.chartTimes.push(ct);
     mainSeries.update(toSeriesPoint(nb, ct));
+    renderFlowLines(); // flows booked after the last bar now land on the new one
   } else if (k === last.t) {
     last.c = v; last.h = Math.max(last.h, v); last.l = Math.min(last.l, v);
     mainSeries.update(toSeriesPoint(last, state.chartTimes[state.chartTimes.length - 1]));
@@ -1728,6 +1830,7 @@ function renderToolbar() {
   $('seg-mode').title = why ? `Storico reale non disponibile: ${why}.` : $('seg-mode').getAttribute('title');
   const contribOk = realActive() && state.scope === 'all';
   $('opt-contrib').checked = state.showContrib;
+  $('opt-flows').checked = state.showFlows;
   $('opt-contrib').disabled = !contribOk;
   $('lbl-contrib').style.display = state.valueMode === 'real' ? '' : 'none';
   $('lbl-contrib').style.opacity = contribOk ? 1 : 0.4;
@@ -1775,6 +1878,7 @@ $('seg-scale').onclick = (e) => {
 };
 $('opt-static').onchange = (e) => { state.includeStatic = e.target.checked; store.set('includeStatic', state.includeStatic); renderTable(); updateKpis(); rebuild(false); };
 $('opt-contrib').onchange = (e) => { state.showContrib = e.target.checked; store.set('showContrib', state.showContrib); renderRealOverlay(); };
+$('opt-flows').onchange = (e) => { state.showFlows = e.target.checked; store.set('showFlows', state.showFlows); renderFlowLines(); updateLegend(null); };
 $('seg-mode').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   state.valueMode = b.dataset.v; store.set('valueMode', state.valueMode);
