@@ -129,6 +129,7 @@ footer a{color:#8fb0ff}
   <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
   <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
   <div class="kpi"><div class="lbl">TIR (XIRR)</div><div class="val num" id="k-irr">—</div></div>
+  <div class="kpi"><div class="lbl">TWR</div><div class="val num" id="k-twr">—</div></div>
   <div class="kpi"><div class="lbl">Nel periodo</div><div class="val num" id="k-period">—</div></div>
   <div class="kpi"><div class="lbl">Peso sul totale</div><div class="val num" id="k-weight">—</div></div>
 </section>
@@ -1256,6 +1257,7 @@ function updateKpis() {
   $('k-closed').innerHTML = realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`;
   renderPnlBreakdown();
   renderIrr();
+  renderTwr();
   $('k-weight').textContent = total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—';
   document.title = `${fmtUsd(value)} · Portfolio Tracker`;
 }
@@ -1385,6 +1387,9 @@ function scopeFlows() {
       if (Math.abs(c - prev) >= 0.005) list.push({ d, a: c - prev });
       prev = c;
     });
+    // flows booked after the last history day (e.g. a weekend deposit) are only in the snapshot's total
+    const tail = state.snap.contrib_net;
+    if (tail != null && isFinite(tail) && Math.abs(tail - prev) >= 0.005) list.push({ d: state.snap.asof, a: tail - prev });
     return { list, src: 'variazioni dei contributi netti nella serie storica' };
   }
   return { why: 'Questo snapshot non ha i flussi per conto: arrivano con il Portfolio Brief 0.8.0' };
@@ -1426,6 +1431,106 @@ function renderIrr() {
     short ? 'Su meno di un anno il tasso annualizzato amplifica le oscillazioni: va letto con cautela.' : '',
     st.r == null ? 'Nessun tasso tra −99% e +500% annuo azzera i flussi.' : '',
   ].filter(Boolean).join('\n');
+}
+/* ------------------------------------------------------------------ time-weighted return (TWR) */
+/** Value series of the current view from the snapshot's daily history; null when the history cannot isolate it. */
+function scopeHistoryValues(h) {
+  if (state.scope === 'all') return h.value;
+  if (!h.broker) return null;
+  if (state.scope === 'broker') return h.broker;
+  if (state.scope === 'crypto') return h.value.map((v, i) => (v == null || h.broker[i] == null ? null : v - h.broker[i]));
+  return null;
+}
+/** Index of the first ISO date in the sorted array that is >= d (dates.length when none). */
+function firstOnOrAfter(dates, d) {
+  let lo = 0, hi = dates.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (dates[mid] < d) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+/**
+ * TWR index of the current view over the snapshot's history, chained day by day with the brief's
+ * modified Dietz formula: r = (V_t - V_t-1 - F_t) / (V_t-1 + F_t / 2), F_t = net external flows of day t.
+ * Broker flows come per history day from the brief (history.flow_broker, 0.8.1+), where
+ * securities received enter at market value; crypto lots land on the first history day on or after
+ * their date. Flows dated after the last history day are kept for the live step.
+ * Depends only on the snapshot and the view, so it is cached.
+ */
+const twrCache = { snap: null, scope: null, base: null };
+function twrBase() {
+  if (twrCache.snap !== state.snap || twrCache.scope !== state.scope) {
+    twrCache.snap = state.snap; twrCache.scope = state.scope; twrCache.base = buildTwrBase();
+  }
+  return twrCache.base;
+}
+function buildTwrBase() {
+  if (state.scope === 'custom') return { why: 'La serie storica e i flussi sono per conto, non per titolo: il TWR di una selezione di simboli non è calcolabile' };
+  const h = state.snap.history;
+  if (!h || !h.dates || !h.dates.length || !h.value) return { why: 'Lo snapshot non contiene la serie storica del valore' };
+  const vals = scopeHistoryValues(h);
+  if (!vals) return { why: 'La serie storica di questo snapshot non separa Broker e crypto' };
+  const f = state.snap.flows;
+  if (!f || !h.flow_broker || h.flow_broker.length !== h.dates.length) {
+    return { why: 'Questo snapshot non ha i flussi giornalieri della serie storica: arrivano con il Portfolio Brief 0.8.1. Senza, i titoli ricevuti in regalo sembrerebbero rendimento.' };
+  }
+  const dates = h.dates.map((d) => String(d).slice(0, 10));
+  const n = dates.length, flow = new Array(n).fill(0), lastDay = dates[n - 1];
+  let pending = 0;
+  if (state.scope !== 'crypto') {
+    h.flow_broker.forEach((a, i) => { flow[i] += a || 0; });
+    for (const [d, a] of f.broker || []) if (String(d).slice(0, 10) > lastDay) pending += a;
+  }
+  if (state.scope !== 'broker') {
+    for (const [d, , a] of f.crypto || []) {
+      const i = firstOnOrAfter(dates, String(d).slice(0, 10));
+      if (i < n) flow[i] += a; else pending += a;
+    }
+  }
+  const idx = new Array(n).fill(null);
+  let level = 1, prev = null, start = -1, last = -1;
+  for (let i = 0; i < n; i++) {
+    const v = vals[i];
+    if (v == null || !isFinite(v)) continue;
+    if (prev != null && prev + flow[i] / 2 > 1) level *= 1 + (v - prev - flow[i]) / (prev + flow[i] / 2);
+    if (start < 0 && (v > 1 || flow[i] > 0)) start = i;
+    if (start >= 0) idx[i] = level;
+    prev = v; last = i;
+  }
+  if (start < 0) return { why: 'Nessun valore investito in questa vista' };
+  return { dates, idx, start, last, lastValue: vals[last], level, pending };
+}
+/** Live TWR: the cached history index times one more modified Dietz step from the last history close to the live value. */
+function twrStats() {
+  const b = twrBase();
+  if (b.why) return b;
+  let value = 0;
+  for (const p of scopePositions()) value += isMarketPos(p) ? p.qty * priceOf(p) : p.value;
+  const den = b.lastValue + b.pending / 2;
+  const step = den > 1 ? (value - b.lastValue - b.pending) / den : 0;
+  const now = Date.now(), I = b.level * (1 + step);
+  const since = (iso) => { // TWR from the close of the last history day before iso
+    let i = firstOnOrAfter(b.dates, iso) - 1;
+    while (i >= 0 && b.idx[i] == null) i--;
+    return i >= b.start ? I / b.idx[i] - 1 : null;
+  };
+  const today = new Date();
+  const years = (now - isoDayMs(b.dates[b.start])) / DAY_MS / YEAR_DAYS;
+  const yearAgo = new Date(now - 365 * DAY_MS).toISOString().slice(0, 10);
+  return { total: I - 1, ann: years > 0.5 ? Math.pow(I, 1 / years) - 1 : null, years, first: b.dates[b.start],
+           ytd: since(`${today.getFullYear()}-01-01`), y1: since(yearAgo), step, lastDate: b.dates[b.last] };
+}
+function renderTwr() {
+  const el = $('k-twr'), box = el.parentElement;
+  const t = twrStats();
+  if (t.why) { el.textContent = '—'; box.title = t.why; return; }
+  el.innerHTML = t.ann == null
+    ? `<span class="${cls(t.total)}">${fmtPct(t.total)}</span><span class="muted"> totale</span>`
+    : `<span class="${cls(t.ann)}">${fmtPct(t.ann)}</span><span class="muted">/anno${t.years < 1 ? ' (meno di 1 anno)' : ''} · ${fmtPct(t.total, 1)} totale</span>`;
+  box.title = [
+    'Rendimento time-weighted: quanto avrebbe reso 1 $ investito dal primo giorno e mai toccato. Toglie l\'effetto di versamenti e prelievi, quindi misura la strategia ed è confrontabile con un indice.',
+    `Dal ${t.first} (${t.years.toFixed(1).replace('.', ',')} anni) · YTD ${fmtPct(t.ytd, 1)} · 1 anno ${fmtPct(t.y1, 1)}`,
+    `Giorno per giorno con il Dietz modificato del brief fino al ${t.lastDate}, poi un ultimo tratto con i prezzi live: ${fmtPct(t.step)}.`,
+    'Il valore include liquidità e CD anche se nascosti. I titoli ricevuti in regalo contano come versamento al valore di mercato, come nel brief.',
+  ].join('\n');
 }
 function updatePeriodKpi() {
   if (!state.agg.length) { $('k-period').textContent = '—'; return; }
