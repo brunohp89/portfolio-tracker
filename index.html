@@ -57,6 +57,7 @@ header .asof{color:var(--muted)}
 #flowlines .fl.out{border-left-color:rgba(239,83,80,.8)}
 #flowlines .fl span{position:absolute;bottom:2px;left:3px;font-size:10px;font-family:var(--mono);color:#26a69a;white-space:nowrap;background:rgba(15,19,28,.75);padding:0 3px;border-radius:2px}
 #flowlines .fl.out span{color:#ef5350}
+#flowlines .fl.op{border-left:1px dotted rgba(240,180,41,.5)}
 #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
 #overlay.show{display:flex}
 #banner{display:none;padding:7px 16px;background:#2a2410;color:#e8d49a;border-bottom:1px solid #4a3f17;font-size:12px}
@@ -165,6 +166,7 @@ footer a{color:#8fb0ff}
   </div>
   <label class="chk" id="lbl-contrib" title="Linea dei versamenti netti cumulati (solo Storico reale, Tutto)"><input type="checkbox" id="opt-contrib">Versamenti</label>
   <label class="chk" id="lbl-flows" title="Linee verticali nei giorni in cui entra o esce denaro: versamenti, prelievi, titoli ricevuti, crypto in arrivo nei wallet. Con Posizioni attuali il grafico coincide con il valore vero del portafoglio solo dopo l'ultima linea, e solo se da allora non ci sono stati acquisti o vendite."><input type="checkbox" id="opt-flows">Flussi</label>
+  <label class="chk" id="lbl-trades" title="Linee punteggiate nei giorni in cui una posizione è cambiata senza denaro in entrata o in uscita: acquisti, vendite, dividendi reinvestiti, crypto inviate. Con Posizioni attuali il grafico coincide con il portafoglio reale dopo l'ultima linea, di qualunque tipo."><input type="checkbox" id="opt-trades">Operazioni</label>
 </div>
 
 <div id="picker"></div>
@@ -354,6 +356,7 @@ const state = {
   valueMode: store.get('valueMode', 'positions'), // 'positions' | 'real'
   showContrib: store.get('showContrib', true),
   showFlows: store.get('showFlows', true),
+  showTrades: store.get('showTrades', true),
   live: {},            // symbol -> { price, prev, t, src }
   barCache: new Map(), // cache key -> { at, bars, meta }
   agg: [],             // aggregated bars of the current view, UTC seconds
@@ -1041,23 +1044,50 @@ function flowEvents() {
   }
   return out;
 }
-/** Flows grouped by the chart bar they fall in: Map(bar index -> { net, items }). */
+/**
+ * Position changes of the current view without money in or out (brief 0.9.1+):
+ * { d, sym, kind: buy | sell | reinvest | out | sent, q, a }.
+ */
+function tradeEvents() {
+  const t = state.snap.trades;
+  if (!t) return [];
+  return t.filter(([, sym, kind]) => {
+    if (state.scope === 'custom') return state.custom.has(sym);
+    if (state.scope === 'crypto') return kind === 'sent';
+    if (state.scope === 'broker') return kind !== 'sent';
+    return true;
+  }).map(([d, sym, kind, q, a]) => ({ d: String(d).slice(0, 10), sym, kind, q, a }));
+}
+/**
+ * Last day the positions of the view changed (a flow or a trade): from then on the chart of
+ * today's positions is the real value. null when the snapshot has no trades to tell.
+ */
+function positionsExactSince() {
+  if (!state.snap.trades) return null;
+  let last = '';
+  for (const e of flowEvents()) if (e.d > last) last = e.d;
+  for (const e of tradeEvents()) if (e.d > last) last = e.d;
+  return last || null;
+}
+/** Flows and trades grouped by the chart bar they fall in: Map(bar index -> { net, items, trades }). */
 let flowBars = new Map();
 function computeFlowBars() {
   flowBars = new Map();
-  if (!state.showFlows || !state.agg.length) return;
+  if (!state.agg.length || (!state.showFlows && !state.showTrades)) return;
   const iv = INTERVALS[state.interval];
   const times = state.agg.map((b) => b.t);
-  for (const e of flowEvents()) {
+  const place = (e, add) => {
     const ts = localDayTs(e.d);
     const key = iv.intraday ? ts : bucketStart(ts, iv.sec);
-    if (key < times[0] || ts > nowSec()) continue; // before the visible history, or not happened yet
+    if (key < times[0] || ts > nowSec()) return; // before the visible history, or not happened yet
     const j = firstOnOrAfterNum(times, key);
-    if (j >= times.length) continue;
-    const g = flowBars.get(j) || { net: 0, items: [] };
-    g.net += e.a; g.items.push(e);
+    if (j >= times.length) return;
+    const g = flowBars.get(j) || { net: 0, items: [], trades: [] };
+    add(g);
     flowBars.set(j, g);
-  }
+  };
+  if (state.showFlows) for (const e of flowEvents()) place(e, (g) => { g.net += e.a; g.items.push(e); });
+  if (state.showTrades) for (const e of tradeEvents()) place(e, (g) => { g.trades.push(e); });
 }
 function firstOnOrAfterNum(arr, x) {
   let lo = 0, hi = arr.length;
@@ -1082,24 +1112,32 @@ function drawFlowLines() {
     // every line is drawn; amount labels go to the largest flows first, where there is room
     // (the legend shows every flow of the bar under the crosshair)
     const placed = [];
-    for (const p of [...pts].sort((a, b) => Math.abs(b.g.net) - Math.abs(a.g.net))) {
+    for (const p of [...pts].filter((q) => q.g.items.length).sort((a, b) => Math.abs(b.g.net) - Math.abs(a.g.net))) {
       if (placed.every((x) => Math.abs(x - p.x) >= 44)) { p.label = true; placed.push(p.x); }
     }
     let html = '';
     for (const { x, g, label } of pts) {
-      html += `<div class="fl${g.net < 0 ? ' out' : ''}" style="left:${x}px;bottom:${axisH}px">${label ? `<span>${fmtK(g.net)}</span>` : ''}</div>`;
+      const kind = !g.items.length ? ' op' : g.net < 0 ? ' out' : ''; // a day with a flow is drawn as a flow
+      html += `<div class="fl${kind}" style="left:${x}px;bottom:${axisH}px">${label ? `<span>${fmtK(g.net)}</span>` : ''}</div>`;
     }
     box.innerHTML = html;
   });
 }
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
 chart.timeScale().subscribeSizeChange(drawFlowLines);
+const TRADE_LABEL = { buy: 'acquisto', sell: 'vendita', reinvest: 'reinvestimento', out: 'trasferimento in uscita', sent: 'inviate dal wallet' };
 function flowLegend(idx) {
   const g = flowBars.get(idx);
   if (!g) return '';
   const label = (e) => e.what === 'Broker' ? (e.a >= 0 ? 'entrata Broker' : 'uscita Broker')
     : e.what === 'flussi netti' ? 'flussi netti' : `${e.what} arrivati nel wallet`;
-  return '<br><span class="muted">Flussi:</span> ' + g.items.map((e) => `${label(e)} <span class="num ${cls(e.a)}">${fmtSigned(e.a)}</span> <span class="muted">(${e.d})</span>`).join(' · ');
+  let out = '';
+  if (g.items.length) out += '<br><span class="muted">Flussi:</span> ' + g.items.map((e) => `${label(e)} <span class="num ${cls(e.a)}">${fmtSigned(e.a)}</span> <span class="muted">(${e.d})</span>`).join(' · ');
+  if (g.trades.length) {
+    const shown = g.trades.slice(0, 4).map((e) => `<span style="color:#f0b429">${TRADE_LABEL[e.kind] || e.kind}</span> ${e.sym} ${fmtQty(e.q)}${e.a ? ` <span class="muted">(${fmtUsd(e.a)})</span>` : ''}`);
+    out += '<br><span class="muted">Operazioni:</span> ' + shown.join(' · ') + (g.trades.length > 4 ? ` <span class="muted">e altre ${g.trades.length - 4}</span>` : '');
+  }
+  return out;
 }
 
 /** Cumulative net contributions (dashed), shown with the real history of the whole portfolio. */
@@ -1158,13 +1196,18 @@ function soloLegend(b) {
   return `<br><span style="color:#f0b429">PMC ${fmtPrice(pmc)}</span> · <span class="muted">prezzo</span> <span class="num">${fmtPrice(px)}</span>` +
     ` · <span class="muted">sul PMC</span> <span class="num ${cls(px - pmc)}">${fmtPct(px / pmc - 1)}</span>`;
 }
+/** In "current positions" mode: the day from which the chart is the real value of the view. */
+function exactSinceText() {
+  const d = positionsExactSince();
+  return d ? `</b> <span class="muted">· uguale al reale dal ${new Date(localDayTs(d) * 1000).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}</span><b>` : '';
+}
 function legendTitle() {
   if (state.scope === 'custom') {
     const s = [...state.custom];
-    return s.length <= 4 ? s.join(' + ') : `${s.length} simboli`;
+    return (s.length <= 4 ? s.join(' + ') : `${s.length} simboli`) + exactSinceText();
   }
   const t = { all: 'Tutto il portafoglio', broker: 'Broker', crypto: 'Crypto' }[state.scope];
-  return state.aggMeta && state.aggMeta.real ? t + ' · storico reale' : t;
+  return state.aggMeta && state.aggMeta.real ? t + ' · storico reale' : t + exactSinceText();
 }
 chart.subscribeCrosshairMove((param) => updateLegend(param && param.time != null ? param : null));
 
@@ -1831,6 +1874,7 @@ function renderToolbar() {
   const contribOk = realActive() && state.scope === 'all';
   $('opt-contrib').checked = state.showContrib;
   $('opt-flows').checked = state.showFlows;
+  $('opt-trades').checked = state.showTrades;
   $('opt-contrib').disabled = !contribOk;
   $('lbl-contrib').style.display = state.valueMode === 'real' ? '' : 'none';
   $('lbl-contrib').style.opacity = contribOk ? 1 : 0.4;
@@ -1879,6 +1923,7 @@ $('seg-scale').onclick = (e) => {
 $('opt-static').onchange = (e) => { state.includeStatic = e.target.checked; store.set('includeStatic', state.includeStatic); renderTable(); updateKpis(); rebuild(false); };
 $('opt-contrib').onchange = (e) => { state.showContrib = e.target.checked; store.set('showContrib', state.showContrib); renderRealOverlay(); };
 $('opt-flows').onchange = (e) => { state.showFlows = e.target.checked; store.set('showFlows', state.showFlows); renderFlowLines(); updateLegend(null); };
+$('opt-trades').onchange = (e) => { state.showTrades = e.target.checked; store.set('showTrades', state.showTrades); renderFlowLines(); updateLegend(null); };
 $('seg-mode').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   state.valueMode = b.dataset.v; store.set('valueMode', state.valueMode);
