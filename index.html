@@ -225,7 +225,7 @@ footer a{color:#8fb0ff}
     <tfoot id="wallet-foot"></tfoot>
   </table>
   <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo live dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span></div>
-  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><span class="hint" id="wallet-refresh-msg"></span></div>
+  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
@@ -2848,10 +2848,29 @@ async function openPlaid(itemId) {
 }
 el('plaid-link').onclick = () => openPlaid(null);
 
+/** Read-only check of Plaid's institution list: links nothing and uses no Item. */
+el('plaid-search').onclick = async () => {
+  if (!conn) return;
+  const q = (prompt('Nome dell\'istituto da cercare in Plaid', 'Broker') || '').trim();
+  if (q.length < 2) return;
+  plaidMsg('Cerco…');
+  try {
+    let res;
+    try {
+      res = await fetch(conn.url + '/plaid/institutions?q=' + encodeURIComponent(q), { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' });
+    } catch { throw new Error('Worker non raggiungibile'); }
+    const out = await res.json().catch(() => null);
+    if (!res.ok || !out || !out.ok) throw new Error((out && out.message) || 'HTTP ' + res.status);
+    if (!out.institutions.length) { plaidMsg(`Plaid: nessun istituto trovato per "${q}".`); return; }
+    plaidMsg(out.institutions.map((i) => `${i.name}: ${i.products.join(', ') || 'nessun prodotto'}${i.oauth ? ' (OAuth)' : ''}`).join(' · '));
+  } catch (e) { plaidMsg('Plaid: ' + e.message, true); }
+};
+
 function renderPlaidItems(plaid) {
   const box = el('plaid-items');
   box.replaceChildren();
   el('plaid-link').hidden = !(plaid && plaid.configured);
+  el('plaid-search').hidden = !(plaid && plaid.configured);
   if (!plaid || !plaid.items || !plaid.items.length) return;
   for (const it of plaid.items) {
     const row = document.createElement('div');
