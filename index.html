@@ -122,7 +122,8 @@ footer a{color:#8fb0ff}
 #wallet-wrap tfoot tr.sub:first-child td{border-top:2px solid #3a4358}
 #wallet-wrap tfoot tr.grand td{background:#1d2b55;color:#fff;font-weight:600;border-top:1px solid #2b3d73}
 #wallet-wrap tfoot tr.grand td.num{font-size:14px}
-#wallet-wrap .stale{color:var(--warn)}
+#wallet-wrap .alarm{margin-right:5px;cursor:help}
+#wallet-wrap th .sm{display:none}
 #wallet-info{padding:6px 10px 0}
 #wallet-actions{padding:8px 10px 0}
 #wallet-wrap .tag{display:inline-block;min-width:17px;padding:0 4px;margin-right:7px;border:1px solid;border-radius:4px;font:600 10px/15px var(--mono);text-align:center;vertical-align:1px}
@@ -141,7 +142,7 @@ footer a{color:#8fb0ff}
 #extra-name{flex:1 1 100%;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
 #extra-sign{padding:6px 12px;font-family:var(--mono);font-size:15px}
 #extra-hint{padding:4px 10px 0}
-@media (max-width:700px){#wallet-wrap td.l{max-width:150px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}}
+@media (max-width:700px){#wallet-wrap table{font-size:12px}#wallet-wrap td.l{max-width:118px}#wallet-wrap .tag{margin-right:4px}#wallet-wrap .ren{padding-right:3px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}#wallet-wrap td,#wallet-wrap th{padding-left:6px;padding-right:6px}#wallet-wrap th .lg{display:none}#wallet-wrap th .sm{display:inline}}
 </style>
 </head>
 <body>
@@ -222,7 +223,7 @@ footer a{color:#8fb0ff}
 <details class="tablewrap" id="wallet-wrap" open hidden>
   <summary id="wallet-sum">Conti</summary>
   <table>
-    <thead><tr><th class="l">Conto</th><th>Saldo</th><th>Credito usato</th><th class="last">Ultimo mov.</th></tr></thead>
+    <thead><tr><th class="l">Conto</th><th>Saldo</th><th><span class="lg">Credito usato</span><span class="sm">Credito</span></th><th class="last">Ultimo mov.</th><th class="sync"><span class="lg">Ultima sync</span><span class="sm">Sync</span></th></tr></thead>
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
@@ -2571,7 +2572,9 @@ el('connect-form').addEventListener('submit', async (ev) => {
 let wallet = read(LS.wallet);   // { data, fetchedAt }
 let walletErr = '';
 let walletBusy = false;
-const WALLET_STALE_DAYS = 7;
+/** A bank-synced account not synced for longer than this gets the alarm icon. */
+const SYNC_ALARM_MS = 24 * 60 * 60 * 1000;
+const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
 
 const fmtMoney = (v, cur) => {
   if (v == null || !isFinite(v)) return '—';
@@ -2579,7 +2582,6 @@ const fmtMoney = (v, cur) => {
   return (v < 0 ? '−' : '') + sym + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 const fmtDay = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
-const ACCOUNT_ORDER = { CurrentAccount: 0, Savings: 1, CreditCard: 2, Cash: 3, Manual: 4 };
 const fmtWhole = (v, cur) => fmtMoney(v, cur).replace(/\.\d{2}$/, '');
 /** "owed / limit · pct" cell; the amounts are hidden on narrow screens, the percentage stays. */
 function creditCell(c, cur) {
@@ -2688,9 +2690,7 @@ function renderWallet() {
     const rows = extra
       ? [...d.accounts, { name: extra.name, type: 'Manual', currency: extra.currency, bankSync: false, balance: extra.amount, lastRecordDate: null, credit: null, local: true }]
       : d.accounts;
-    const accounts = [...rows].sort((a, b) =>
-      (a.currency === b.currency ? 0 : a.currency === 'USD' ? -1 : 1) ||
-      ((ACCOUNT_ORDER[a.type] ?? 9) - (ACCOUNT_ORDER[b.type] ?? 9)) || a.name.localeCompare(b.name));
+    const accounts = [...rows].sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base', numeric: true }));
     for (const a of accounts) {
       const tr = document.createElement('tr');
       const name = cell('', 'l');
@@ -2702,7 +2702,14 @@ function renderWallet() {
       ren.type = 'button'; ren.className = 'ren'; ren.textContent = '✎';
       ren.title = 'Rinomina'; ren.setAttribute('aria-label', 'Rinomina ' + a.name);
       ren.onclick = () => renameAccount(a);
-      name.append(tag, ren, a.name);
+      name.append(tag, ren);
+      if (a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS) {
+        const al = document.createElement('span');
+        al.className = 'alarm'; al.textContent = '⚠️';
+        al.title = `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT')}: controlla il collegamento` + (a.source === 'plaid' ? ' in Plaid (Riconnetti)' : ' in Wallet');
+        name.append(al);
+      }
+      name.append(a.name);
       name.title = a.name + (a.originalName ? ` (nome originale: ${a.originalName})` : '') + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
       const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
       if (a.pending && a.pending.count) {
@@ -2720,18 +2727,17 @@ function renderWallet() {
       }
       tr.append(name, bal);
       tr.append(creditCell(a.credit, a.currency));
-      const last = cell(fmtDay(a.lastRecordDate), 'num last');
-      if (a.bankSync && a.lastRecordDate && (today - Date.parse(a.lastRecordDate)) / 86400000 > WALLET_STALE_DAYS) {
-        last.classList.add('stale'); last.title = `Nessun movimento da più di ${WALLET_STALE_DAYS} giorni: controlla la sincronizzazione in Wallet`;
-      }
-      tr.append(last);
+      tr.append(cell(fmtDay(a.lastRecordDate), 'num last'));
+      const sync = cell(fmtSyncDay(a.lastSync), 'num sync');
+      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? ' (movimenti via Plaid; il saldo è letto in tempo reale)' : ' (ultima modifica registrata da Wallet)');
+      tr.append(sync);
       body.append(tr);
     }
     const t = accountTotals(d);
     const addFoot = (label, value, creditTd, kind) => {
       const tr = document.createElement('tr');
       tr.className = kind;
-      tr.append(cell(label, 'l'), cell(value, 'num'), creditTd || cell('', 'num'), cell('', 'last'));
+      tr.append(cell(label, 'l'), cell(value, 'num'), creditTd || cell('', 'num'), cell('', 'last'), cell('', 'sync'));
       foot.append(tr);
     };
     for (const [cur, v] of Object.entries(t.byCurrency || {})) addFoot('Conti in ' + cur, fmtMoney(v, cur), null, 'sub');
