@@ -15,6 +15,10 @@
  *   BRIEF_NAME      text      optional, default portfolio_brief.html
  *   WALLET_API_TOKEN secret   BudgetBakers Wallet REST API token (for /wallet)
  *   CREDIT_LIMITS   secret    optional JSON {"<Wallet account name>": limit}; wins over Wallet's limit
+ *   PLAID_CLIENT_ID text      Plaid client id (optional: without the Plaid trio /wallet is Wallet only)
+ *   PLAID_SECRET    secret    Plaid secret for PLAID_ENV
+ *   PLAID_ENV       text      optional, "production" (default) or "sandbox"
+ *   PLAID_KV        KV        namespace holding the Plaid access tokens, one key per linked bank
  *
  * Endpoints:
  *   GET /            liveness check, no data
@@ -24,6 +28,11 @@
  *   GET /wallet      balance of every BudgetBakers Wallet account (investments excluded),
  *                    credit card utilization and totals; cached in memory for WALLET_TTL_MS.
  *                    ?fresh=1 skips the cache if it is older than WALLET_FORCE_MIN_MS.
+ *                    Accounts linked through Plaid replace their Wallet twin (same last 4
+ *                    digits) with the bank's live balance, pending transactions included.
+ *   POST /plaid/link-token   {itemId?, redirectUri?} -> {linkToken} to open Plaid Link
+ *                            (itemId = update mode, to re-authorise a linked bank)
+ *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
  * nothing changed, without downloading the file from Drive.
  */
@@ -54,9 +63,15 @@ export default {
     const cors = corsHeaders(request, env);
     try {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       const url = new URL(request.url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
+      if (request.method === "POST" && PLAID_POST_ROUTES[path]) {
+        await requireToken(request, env);
+        if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
+        const input = await request.json().catch(() => ({}));
+        return json(await PLAID_POST_ROUTES[path](env, input || {}), 200, cors);
+      }
+      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
       if (path !== "/check" && path !== "/wallet" && !ROUTES[path]) throw new HttpError(404, "not_found");
 
@@ -101,8 +116,8 @@ function corsHeaders(request, env) {
   const allowed = (env.ALLOWED_ORIGIN || "*").trim().replace(/\/+$/, "");
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, If-None-Match",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, If-None-Match, Content-Type",
     "Access-Control-Expose-Headers": "ETag, Last-Modified",
     "Access-Control-Max-Age": "86400",
     "Cache-Control": "private, no-store",
@@ -306,11 +321,14 @@ function walletAccount(a, limits) {
   // cards applies -abs(), which would turn an overpayment into debt.
   const raw = Number(bal.rawCurrentBalance ?? bal.currentBalance ?? 0);
   const last = a.recordStats && a.recordStats.recordDate && a.recordStats.recordDate.max;
+  const mask = /(\d{4})$/.exec(a.bankAccountNumber || "");
   const out = {
     id: a.id,
     name: a.name,
     type: a.accountType,
     currency: a.currencyCode,
+    source: "wallet",
+    mask: mask ? mask[1] : null,
     bankSync: !!a.isBankSync,
     balance: round2(raw),
     lastRecordDate: last ? last.slice(0, 10) : null,
@@ -349,8 +367,8 @@ async function walletSummary(env, force) {
   }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
   const limits = creditLimitOverrides(env);
-  const accounts = kept.map((a) => walletAccount(a, limits));
-  const fx = await walletEurUsd(env, kept);
+  const [fx, plaid] = await Promise.all([walletEurUsd(env, kept), plaidSummary(env, limits)]);
+  const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
 
   const byCurrency = {};
   for (const a of accounts) byCurrency[a.currency] = round2((byCurrency[a.currency] || 0) + a.balance);
@@ -368,12 +386,186 @@ async function walletSummary(env, force) {
     generatedAt: new Date().toISOString(),
     dataChangedAt: headers && headers.get("X-Last-Data-Change-At"),
     syncInProgress: headers ? headers.get("X-Sync-In-Progress") === "true" : null,
-    pendingIncluded: false,
+    pendingIncluded: accounts.some((a) => a.pending && a.pending.known),
     fx,
+    plaid: { configured: plaid.configured, items: plaid.items, pendingDays: PLAID_PENDING_DAYS },
     accounts,
     totals: { byCurrency, ...(total || {}) },
     credit: limit ? { owed: round2(owed), limit: round2(limit), utilizationPct: Math.round((1000 * owed) / limit) / 10 } : null,
   };
   walletCache = { at: Date.now(), body };
   return body;
+}
+
+// ---------- Plaid: live balances and pending transactions straight from the banks ----------
+
+const PLAID_HOSTS = { production: "https://production.plaid.com", sandbox: "https://sandbox.plaid.com" };
+const PLAID_ITEM_PREFIX = "item:";
+/** Pending transactions are looked up in this window; they rarely stay pending longer. */
+const PLAID_PENDING_DAYS = 14;
+const PLAID_POST_ROUTES = { "/plaid/link-token": plaidLinkToken, "/plaid/exchange": plaidExchange };
+
+const plaidConfigured = (env) => !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.PLAID_KV);
+
+async function plaidCall(env, path, body) {
+  const host = PLAID_HOSTS[(env.PLAID_ENV || "production").trim()] || PLAID_HOSTS.production;
+  const res = await fetch(host + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "PLAID-CLIENT-ID": env.PLAID_CLIENT_ID.trim(), "PLAID-SECRET": env.PLAID_SECRET.trim() },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new HttpError(502, "plaid_error", `${data.error_code || res.status}: ${data.error_message || "Plaid refused the request"}`);
+    err.plaidCode = data.error_code || null;
+    err.plaidMessage = data.display_message || data.error_message || null;
+    throw err;
+  }
+  return data;
+}
+
+async function plaidItems(env) {
+  const list = await env.PLAID_KV.list({ prefix: PLAID_ITEM_PREFIX });
+  const items = await Promise.all(list.keys.map((k) => env.PLAID_KV.get(k.name, "json")));
+  return items.filter(Boolean);
+}
+
+/** Link token for Plaid Link: a new bank, or update mode for an already linked one (itemId). */
+async function plaidLinkToken(env, input) {
+  const body = { client_name: "Portfolio Tracker", language: "en", country_codes: PLAID_COUNTRY_CODES, user: { client_user_id: "owner" } };
+  if (input.itemId) {
+    const item = await env.PLAID_KV.get(PLAID_ITEM_PREFIX + String(input.itemId), "json");
+    if (!item) throw new HttpError(404, "plaid_item_not_found", "no linked bank with this id");
+    body.access_token = item.accessToken;
+  } else {
+    body.products = ["transactions"];
+    body.transactions = { days_requested: 30 };
+  }
+  if (typeof input.redirectUri === "string" && /^https:\/\/[^\s]+$/.test(input.redirectUri)) body.redirect_uri = input.redirectUri;
+  const data = await plaidCall(env, "/link/token/create", body);
+  return { ok: true, linkToken: data.link_token, expiration: data.expiration };
+}
+
+/** Swaps Link's one-time public token for the bank's access token and keeps it in KV only. */
+async function plaidExchange(env, input) {
+  if (typeof input.publicToken !== "string" || !input.publicToken) throw new HttpError(400, "bad_request", "publicToken missing");
+  const ex = await plaidCall(env, "/item/public_token/exchange", { public_token: input.publicToken });
+  let institutionId = null;
+  try {
+    institutionId = (await plaidCall(env, "/item/get", { access_token: ex.access_token })).item.institution_id || null;
+  } catch { /* the name from Link is enough */ }
+  const institutionName = typeof input.institutionName === "string" ? input.institutionName.slice(0, 80) : null;
+  const item = { itemId: ex.item_id, accessToken: ex.access_token, institutionId, institutionName, linkedAt: new Date().toISOString() };
+  await env.PLAID_KV.put(PLAID_ITEM_PREFIX + ex.item_id, JSON.stringify(item));
+  walletCache = { at: 0, body: null };
+  return { ok: true, itemId: ex.item_id, institutionName };
+}
+
+const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/** Live balances (from the bank) and the pending transactions of one linked bank. */
+async function plaidItemData(env, item) {
+  const today = Date.now();
+  const [bal, tx] = await Promise.allSettled([
+    plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }),
+    plaidCall(env, "/transactions/get", {
+      access_token: item.accessToken,
+      start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
+      end_date: isoDay(today + 86400000),
+      options: { count: 500 },
+    }),
+  ]);
+  const status = { itemId: item.itemId, institution: item.institutionName, ok: bal.status === "fulfilled", error: null, pendingKnown: tx.status === "fulfilled", accounts: 0 };
+  if (bal.status !== "fulfilled") {
+    status.error = { code: bal.reason.plaidCode || "plaid_error", message: bal.reason.plaidMessage || String(bal.reason.message) };
+    return { status, accounts: [] };
+  }
+  const pending = new Map();
+  const lastPosted = new Map();
+  if (tx.status === "fulfilled") {
+    for (const t of tx.value.transactions || []) {
+      if (t.pending) {
+        const p = pending.get(t.account_id) || { out: 0, count: 0 };
+        p.out += Number(t.amount) || 0; // Plaid: positive amount = money leaving the account
+        p.count += 1;
+        pending.set(t.account_id, p);
+      } else if (!lastPosted.has(t.account_id) || t.date > lastPosted.get(t.account_id)) {
+        lastPosted.set(t.account_id, t.date);
+      }
+    }
+  }
+  const accounts = (bal.value.accounts || [])
+    .filter((a) => a.type !== "investment")
+    .map((a) => plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)));
+  status.accounts = accounts.length;
+  return { status, accounts };
+}
+
+function plaidAccount(a, item, pend, pendingKnown, lastDate) {
+  const b = a.balances || {};
+  const isCredit = a.type === "credit";
+  const current = Number(b.current ?? b.available ?? 0);
+  const posted = isCredit ? -current : current; // credit: Plaid's current is the amount owed
+  const out = pend ? pend.out : 0;
+  const balance = round2(posted - out);
+  const acc = {
+    id: "plaid:" + a.account_id,
+    name: [item.institutionName, a.official_name || a.name].filter(Boolean).join(" · "),
+    type: isCredit ? "CreditCard" : a.subtype === "savings" ? "Savings" : "CurrentAccount",
+    currency: b.iso_currency_code || b.unofficial_currency_code || "USD",
+    source: "plaid",
+    institution: item.institutionName,
+    mask: a.mask || null,
+    bankSync: true,
+    balance,
+    postedBalance: round2(posted),
+    pending: { known: pendingKnown, amount: round2(-out), count: pend ? pend.count : 0 },
+    lastRecordDate: lastDate || null,
+    credit: null,
+  };
+  if (isCredit) {
+    const owed = round2(Math.max(0, -balance));
+    const limit = Number(b.limit) || null;
+    acc.credit = { owed, limit, available: limit ? round2(limit - owed) : null, utilizationPct: limit ? Math.round((1000 * owed) / limit) / 10 : null };
+  }
+  return acc;
+}
+
+async function plaidSummary(env, limits) {
+  if (!plaidConfigured(env)) return { configured: false, items: [], accounts: [] };
+  const results = await Promise.all((await plaidItems(env)).map((item) => plaidItemData(env, item)));
+  const accounts = results.flatMap((r) => r.accounts);
+  for (const a of accounts) {
+    // A limit set in CREDIT_LIMITS (by the Wallet name, applied in mergeAccounts) wins; keep Plaid's otherwise.
+    a._limits = limits;
+  }
+  return { configured: true, items: results.map((r) => r.status), accounts };
+}
+
+/**
+ * Plaid accounts replace their Wallet twin (bank-synced, same currency, same last 4 digits) and
+ * keep its name; Plaid accounts with no twin are added; everything else stays from Wallet.
+ */
+function mergeAccounts(walletAccounts, plaidAccounts) {
+  const used = new Set();
+  const merged = walletAccounts.map((w) => {
+    const twin = w.bankSync && w.mask ? plaidAccounts.find((p) => !used.has(p.id) && p.mask === w.mask && p.currency === w.currency) : null;
+    if (!twin) return w;
+    used.add(twin.id);
+    const limits = twin._limits || {};
+    const acc = { ...twin, name: w.name, walletId: w.id };
+    if (acc.credit) {
+      const limit = Number(limits[w.name]) || acc.credit.limit || (w.credit && w.credit.limit) || null;
+      acc.credit = { ...acc.credit, limit, available: limit ? round2(limit - acc.credit.owed) : null, utilizationPct: limit ? Math.round((1000 * acc.credit.owed) / limit) / 10 : null };
+    }
+    delete acc._limits;
+    return acc;
+  });
+  for (const p of plaidAccounts) {
+    if (used.has(p.id)) continue;
+    const acc = { ...p };
+    delete acc._limits;
+    merged.push(acc);
+  }
+  return merged;
 }
