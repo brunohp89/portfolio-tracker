@@ -198,7 +198,6 @@ sequenceDiagram
   P->>P: add the local manual account (localStorage pt.extra) to totals
   P->>P: Patrimonio totale = portfolio at live prices (CD and cash included) + accounts total USD
   P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
-  P->>P: Valore Monefy (bottom of the page) = plain sum with no FX: each account in its own currency + broker deposits - withdrawals in USD (sum of flows[BK]); shown without currency symbol
 ```
 
 **Private labels:** the public code holds placeholders only. `index.html` uses `BROKER` (display

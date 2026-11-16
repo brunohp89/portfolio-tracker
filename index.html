@@ -114,7 +114,11 @@ footer a{color:#8fb0ff}
 #connect .card{width:min(520px,100%)}
 #connect-msg{min-height:1.4em;margin-top:6px}
 #boot-msg{padding:40px 16px;color:var(--muted);text-align:center;font-size:14px}
-#monefy{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 16px;border-top:1px solid var(--line)}
+#monefy{padding:14px 16px;border-top:1px solid var(--line)}
+#monefy .top{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+#monefy .parts{display:grid;grid-template-columns:1fr auto;gap:3px 16px;margin-top:10px;font-size:12px;color:var(--muted)}
+#monefy .parts .n{font-family:var(--mono);text-align:right}
+#monefy .parts .sum{border-top:1px solid var(--line);padding-top:4px;color:var(--text)}
 #monefy[hidden]{display:none}
 #monefy .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
 #monefy .val{font-size:20px;font-weight:600}
@@ -256,7 +260,10 @@ footer a{color:#8fb0ff}
   </table>
 </details>
 
-<section id="monefy" hidden><span class="lbl">Valore Monefy</span><span class="val num" id="monefy-val">—</span></section>
+<section id="monefy" hidden>
+  <div class="top"><span class="lbl">Valore Monefy</span><span class="val num" id="monefy-val">—</span></div>
+  <div class="parts" id="monefy-parts"></div>
+</section>
 
 <footer>
   <div><b>Fonti prezzi.</b> Crypto: Coinbase Exchange (WebSocket in tempo reale e candele storiche; ripiego su Yahoo tramite proxy). Azioni ed ETF: scambi in tempo reale da Finnhub, più Yahoo Finance tramite il tuo proxy per lo storico e gli aggiornamenti a intervalli. I fondi comuni hanno solo il NAV giornaliero.</div>
@@ -2723,14 +2730,27 @@ function renderMonefy() {
   const key = labels && labels.brokerKey;
   const list = flows && key ? flows[key] : null;
   if (!d || !Array.isArray(list)) { box.hidden = true; return; }
-  const byCurrency = accountTotals(d).byCurrency;
-  const accounts = Object.values(byCurrency).reduce((sum, v) => sum + (Number(v) || 0), 0);
+  // The same rows as the Conti table (names, order, manual account), each in its own currency.
+  const rows = [...d.accounts];
+  if (extra) rows.push({ name: extra.name, currency: extra.currency, balance: extra.amount });
+  rows.sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base', numeric: true }));
+  const accounts = rows.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
   const net = list.reduce((sum, row) => sum + (Number(row[1]) || 0), 0);
+  const total = Math.round((accounts + net) * 100) / 100;
   const plain = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  el('monefy-val').textContent = plain(accounts + net);
-  box.title = 'Somma senza conversioni: ' +
-    Object.entries(byCurrency).map(([cur, v]) => `conti in ${cur} ${plain(v)}`).join(' + ') +
-    ` + versamenti netti del broker in USD ${plain(net)}`;
+  el('monefy-val').textContent = plain(total);
+  box.title = 'Somma senza conversioni dei saldi dei conti, ciascuno nella sua valuta, più i versamenti netti del broker in USD';
+  const parts = el('monefy-parts');
+  parts.replaceChildren();
+  const line = (label, value, cls) => {
+    const l = document.createElement('span'); l.textContent = label;
+    const v = document.createElement('span'); v.className = 'n'; v.textContent = value;
+    if (cls) { l.classList.add(cls); v.classList.add(cls); }
+    parts.append(l, v);
+  };
+  for (const a of rows) line(a.name, fmtMoney(a.balance, a.currency));
+  line(`Versamenti netti ${(labels && labels.broker) || 'broker'}`, fmtMoney(net, 'USD'));
+  line('Somma (senza conversioni)', plain(total), 'sum');
   box.hidden = false;
 }
 
