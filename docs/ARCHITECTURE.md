@@ -253,7 +253,9 @@ Balance rules:
   `/transactions/refresh` for each bank, at most once every 5 minutes per Item (Plaid allows 2 per
   minute and 120 per hour). Plaid fetches asynchronously, so the PWA reads `/wallet?fresh=1` again
   90 seconds later. If Plaid refuses the call as not enabled for the account (it is an add-on), the
-  error is shown in the bank's status line and the call is not retried for 24 hours.
+  error is shown in the bank's status line and the call is not retried for 24 hours. Plaid answers the
+  call only after the bank does (2.5 to 10 seconds observed, more for some banks); past 12 seconds the
+  Worker stops waiting and counts it as requested (`txRefreshUnconfirmed`), not as an error.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
