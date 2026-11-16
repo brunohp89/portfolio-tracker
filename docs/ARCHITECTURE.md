@@ -196,6 +196,7 @@ sequenceDiagram
   end
   P->>P: add the local manual account (localStorage pt.extra) to totals
   P->>P: Patrimonio totale = portfolio at live prices (CD and cash included) + accounts total USD
+  P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
 ```
 
 **Custom names:** the ✎ next to each account renames it for every device (`POST /accounts/rename`,

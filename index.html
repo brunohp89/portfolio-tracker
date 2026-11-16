@@ -34,6 +34,7 @@ header .asof{color:var(--muted)}
 .kpi .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
 .kpi .val{font-size:15px}
 .kpi.big .val{font-size:26px;font-weight:600}
+.kpi .sub{font-size:12px;color:var(--muted);margin-top:1px;min-height:1em}
 .toolbar{display:flex;gap:10px;padding:8px 16px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--line)}
 .seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{background:none;border:0;padding:5px 10px;cursor:pointer;color:var(--muted);border-right:1px solid var(--line)}
@@ -162,8 +163,8 @@ footer a{color:#8fb0ff}
 <div id="banner"></div>
 
 <section class="kpis">
-  <div class="kpi big" id="k-nw-box" hidden><div class="lbl">Patrimonio totale</div><div class="val num" id="k-nw">—</div></div>
-  <div class="kpi big"><div class="lbl" id="k-scope-lbl">Valore</div><div class="val num" id="k-value">—</div></div>
+  <div class="kpi big" id="k-nw-box" hidden><div class="lbl">Patrimonio totale</div><div class="val num" id="k-nw">—</div><div class="sub num" id="k-nw-sub"></div></div>
+  <div class="kpi big"><div class="lbl" id="k-scope-lbl">Valore</div><div class="val num" id="k-value">—</div><div class="sub num" id="k-value-eur"></div></div>
   <div class="kpi" title="Dalla mezzanotte (ora locale), come la candela giornaliera"><div class="lbl">Variazione giorno</div><div class="val num" id="k-day">—</div></div>
   <div class="kpi"><div class="lbl">P&amp;L aperto</div><div class="val num" id="k-pnl">—</div></div>
   <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
@@ -1564,6 +1565,8 @@ function updateKpis() {
   for (const p of positions()) total += isMarketPos(p) ? p.qty * priceOf(p) : p.value;
   $('k-scope-lbl').textContent = SCOPE_LABEL[state.scope];
   $('k-value').textContent = fmtUsd(value, 2);
+  const eurRate = BOOT.eurRate ? BOOT.eurRate() : null;
+  $('k-value-eur').textContent = eurRate ? fmtEur(value / eurRate) : '';
   $('k-day').innerHTML = `<span class="${cls(day)}">${fmtSigned(day)} (${fmtPct(prevVal ? day / prevVal : 0)})</span>`;
   $('k-pnl').innerHTML = `<span class="${cls(pnl)}">${fmtSigned(pnl)} (${fmtPct(value - pnl ? pnl / (value - pnl) : 0)})</span>`;
   const realized = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : null;
@@ -1577,13 +1580,19 @@ function updateKpis() {
   document.title = `${fmtUsd(value)} · Portfolio Tracker`;
 }
 /** Whole portfolio at live prices (CD and cash included, whatever the view) plus the bank accounts from Wallet. */
+const fmtEur = (v) => (v == null || !isFinite(v)) ? '' : (v < 0 ? '−€' : '€') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function renderNetWorth(portfolioTotal) {
   const bank = BOOT.bankTotalUsd ? BOOT.bankTotalUsd() : null;
   const box = $('k-nw-box');
   box.hidden = bank == null;
   if (bank == null) return;
-  $('k-nw').textContent = fmtUsd(portfolioTotal + bank, 2);
-  box.title = `Investimenti ${fmtUsd(portfolioTotal, 2)} a prezzi in tempo reale (CD e liquidità inclusi) + conti ${fmtUsd(bank, 2)} da Wallet (movimenti contabilizzati, euro al cambio di Wallet)`;
+  const total = portfolioTotal + bank;
+  const eurRate = BOOT.eurRate ? BOOT.eurRate() : null;
+  const invested = total > 0 ? `${(portfolioTotal / total * 100).toFixed(1)}% investito` : '';
+  $('k-nw').textContent = fmtUsd(total, 2);
+  $('k-nw-sub').textContent = [eurRate ? fmtEur(total / eurRate) : '', invested].filter(Boolean).join(' · ');
+  box.title = `Investimenti ${fmtUsd(portfolioTotal, 2)} a prezzi in tempo reale (CD e liquidità inclusi) + conti ${fmtUsd(bank, 2)}` +
+    (eurRate ? `. Euro al cambio EURUSD ${eurRate.toFixed(4)}` : '') + (invested ? `. Quota investita: ${invested.replace(' investito', '')} del patrimonio` : '');
 }
 /** Closed positions relevant to the current view (all of them are Broker lines). */
 function scopeClosed() {
@@ -2526,7 +2535,7 @@ function refresh() {
 function start() {
   el('boot-msg').hidden = true;
   el('connect').classList.remove('show');
-  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd });
+  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd, eurRate });
   renderWallet();
   refreshWallet();
 }
@@ -2637,6 +2646,12 @@ function accountTotals(d) {
     }
   }
   return { byCurrency, usd, eur };
+}
+
+/** EURUSD from the Worker (Yahoo Finance, refreshed with the accounts); null if unknown. */
+function eurRate() {
+  const fx = wallet && wallet.data && wallet.data.fx;
+  return fx && fx.rate > 0 ? fx.rate : null;
 }
 
 /** Bank accounts total in USD for the net worth KPI; null until Wallet answered once. */
