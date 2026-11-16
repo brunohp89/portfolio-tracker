@@ -183,7 +183,7 @@ footer a{color:#8fb0ff}
 
 <div class="toolbar">
   <div class="seg" id="seg-scope">
-    <button data-v="all">Tutto</button><button data-v="broker">Broker</button><button data-v="crypto">Crypto</button><button data-v="custom">Simboli…</button>
+    <button data-v="all">Tutto</button><button data-v="broker" data-label="broker">Broker</button><button data-v="crypto">Crypto</button><button data-v="custom">Simboli…</button>
   </div>
   <span class="sep"></span>
   <div class="seg" id="seg-interval"></div>
@@ -196,7 +196,7 @@ footer a{color:#8fb0ff}
     <button data-v="0">$</button><button data-v="2">%</button><button data-v="1">Log</button>
   </div>
   <label class="chk" title="Includi CD e liquidità (valore fisso) nel totale"><input type="checkbox" id="opt-static">CD e liquidità</label>
-  <div class="seg" id="seg-mode" title="Posizioni attuali: le quantità di oggi applicate a tutta la storia. Storico reale: il valore effettivo del conto giorno per giorno dal Portfolio Brief (include versamenti, acquisti e vendite); solo Tutto, Broker e Crypto, candele 1G e 1S.">
+  <div class="seg" id="seg-mode" data-label-title="Posizioni attuali: le quantità di oggi applicate a tutta la storia. Storico reale: il valore effettivo del conto giorno per giorno dal Portfolio Brief (include versamenti, acquisti e vendite); solo Tutto, {broker} e Crypto, candele 1G e 1S." title="Posizioni attuali: le quantità di oggi applicate a tutta la storia. Storico reale: il valore effettivo del conto giorno per giorno dal Portfolio Brief (include versamenti, acquisti e vendite); solo Tutto, Broker e Crypto, candele 1G e 1S.">
     <button data-v="positions">Posizioni attuali</button><button data-v="real">Storico reale</button>
   </div>
   <label class="chk" id="lbl-contrib" title="Linea dei versamenti netti cumulati (solo Storico reale, Tutto)"><input type="checkbox" id="opt-contrib">Versamenti</label>
@@ -355,6 +355,13 @@ export default {
 <script>
 /* The tracker itself. It starts once the loader below has a snapshot to give it. */
 window.startTracker = function (BOOT) {
+/* Private names come from the Worker (/labels, kept in its KV) so this public code holds placeholders
+   only: BROKER is the brokerage's display name and the `account` value of its positions in the
+   snapshot, BK the snapshot's field name for its series and flows (h[BK], h['flow_' + BK], f[BK]). */
+const LABELS = Object.assign({ broker: 'Broker', brokerKey: 'broker' }, BOOT.labels || {});
+const BROKER = LABELS.broker, BK = LABELS.brokerKey;
+for (const el of document.querySelectorAll('[data-label]')) el.textContent = LABELS[el.dataset.label] || el.textContent;
+for (const el of document.querySelectorAll('[data-label-title]')) el.title = el.dataset.labelTitle.replaceAll('{broker}', BROKER);
 'use strict';
 const LWC = window.LightweightCharts;
 const $ = (id) => document.getElementById(id);
@@ -397,7 +404,7 @@ function finnhubKey() {
   if (v.toLowerCase() === 'off') return '';
   return v || DEFAULT_FINNHUB;
 }
-const SCOPE_LABEL = { all: 'Valore portafoglio', broker: 'Valore Broker', crypto: 'Valore crypto', custom: 'Valore selezione' };
+const SCOPE_LABEL = { all: 'Valore portafoglio', broker: 'Valore ' + BROKER, crypto: 'Valore crypto', custom: 'Valore selezione' };
 
 /* ------------------------------------------------------------------ state */
 let embedded = BOOT.snapshot; // latest snapshot from Drive, replaced by applyRemote()
@@ -413,7 +420,8 @@ if (store.get('defaultsVersion', 1) < DEFAULTS_VERSION) {
 const state = {
   snap: pickSnapshot(),
   settings: Object.assign({ proxy: '', token: '', finnhub: '', pollSec: 30 }, store.get('settings', {})),
-  scope: store.get('scope', 'all'),
+  // An unknown stored view (e.g. a key renamed since) falls back to the whole portfolio.
+  scope: ((v) => ['all', 'broker', 'crypto', 'custom'].includes(v) ? v : 'all')(store.get('scope', 'all')),
   custom: new Set(store.get('custom', [])),
   interval: store.get('interval', '1D'),
   range: store.get('range', null),
@@ -948,7 +956,7 @@ function refreshStocksPill(extra) {
 function scopePositions() {
   const all = positions();
   switch (state.scope) {
-    case 'broker': return all.filter((p) => p.account === 'Broker');
+    case 'broker': return all.filter((p) => p.account === BROKER);
     case 'crypto': return all.filter((p) => p.kind === 'crypto');
     case 'custom': return all.filter((p) => state.custom.has(p.symbol));
     default: return all;
@@ -1085,9 +1093,9 @@ function renderSeries(fit) {
 /* ------------------------------------------------------------------ money flow markers */
 /**
  * External flows of the current view, one entry per flow: { d: 'YYYY-MM-DD', a: money in > 0, what }.
- * Broker uses the brief's daily flows of the value history when present (they also hold
+ * The broker uses the brief's daily flows of the value history when present (they also hold
  * securities received, at market value), plus later dated flows; crypto uses the wallet lots.
- * A symbol selection only gets the crypto lots of its coins: Broker money lands in cash.
+ * A symbol selection only gets the crypto lots of its coins: broker money lands in cash.
  */
 function flowEvents() {
   const f = state.snap.flows, h = state.snap.history, out = [];
@@ -1100,10 +1108,11 @@ function flowEvents() {
     return out;
   }
   if (wantBroker) {
-    const daily = h && h.flow_broker && h.flow_broker.length === h.dates.length;
+    const hf = h && h['flow_' + BK];
+    const daily = hf && hf.length === h.dates.length;
     const lastDay = daily ? String(h.dates[h.dates.length - 1]).slice(0, 10) : '';
-    if (daily) h.flow_broker.forEach((a, i) => { if (Math.abs(a || 0) >= 1) out.push({ d: String(h.dates[i]).slice(0, 10), a, what: 'Broker' }); });
-    for (const [d, a] of f.broker || []) if (!daily || String(d).slice(0, 10) > lastDay) out.push({ d: String(d).slice(0, 10), a, what: 'Broker' });
+    if (daily) hf.forEach((a, i) => { if (Math.abs(a || 0) >= 1) out.push({ d: String(h.dates[i]).slice(0, 10), a, what: BROKER }); });
+    for (const [d, a] of f[BK] || []) if (!daily || String(d).slice(0, 10) > lastDay) out.push({ d: String(d).slice(0, 10), a, what: BROKER });
   }
   if (wantCrypto) {
     for (const [d, sym, a] of f.crypto || []) {
@@ -1224,7 +1233,7 @@ const TRADE_LABEL = { buy: 'acquisto', sell: 'vendita', reinvest: 'reinvestiment
 function flowLegend(idx) {
   const g = flowBars.get(idx);
   if (!g) return '';
-  const label = (e) => e.what === 'Broker' ? (e.a >= 0 ? 'entrata Broker' : 'uscita Broker')
+  const label = (e) => e.what === BROKER ? (e.a >= 0 ? `entrata ${BROKER}` : `uscita ${BROKER}`)
     : e.what === 'flussi netti' ? 'flussi netti' : `${e.what} arrivati nel wallet`;
   let out = '';
   if (g.items.length) out += '<br><span class="muted">Flussi:</span> ' + g.items.map((e) => `${label(e)} <span class="num ${cls(e.a)}">${fmtSigned(e.a)}</span> <span class="muted">(${e.d})</span>`).join(' · ');
@@ -1244,7 +1253,7 @@ function flowLegend(idx) {
 let realSeries = null, realByBar = new Map();
 function realLineReason() {
   if (INTERVALS[state.interval].intraday) return 'la serie reale è giornaliera: usa 1G o 1S';
-  if (state.scope === 'custom') return 'il valore reale esiste solo per Tutto, Broker e Crypto';
+  if (state.scope === 'custom') return `il valore reale esiste solo per Tutto, ${BROKER} e Crypto`;
   if (!staticIncluded() && state.scope !== 'crypto') return 'il valore reale comprende liquidità e CD: attiva "CD e liquidità"';
   if (!realHistory(state.scope)) return 'questo snapshot non ha lo storico reale per questa vista';
   return '';
@@ -1356,7 +1365,7 @@ function legendTitle() {
     const s = [...state.custom];
     return (s.length <= 4 ? s.join(' + ') : `${s.length} simboli`) + exactSinceText();
   }
-  const t = { all: 'Tutto il portafoglio', broker: 'Broker', crypto: 'Crypto' }[state.scope];
+  const t = { all: 'Tutto il portafoglio', broker: BROKER, crypto: 'Crypto' }[state.scope];
   return state.aggMeta && state.aggMeta.real ? t + ' · storico reale' : t + exactSinceText();
 }
 chart.subscribeCrosshairMove((param) => updateLegend(param && param.time != null ? param : null));
@@ -1368,8 +1377,8 @@ function realHistory(scope) {
   if (!h || !h.dates || !h.dates.length) return null;
   let vals;
   if (scope === 'all') vals = h.value;
-  else if (scope === 'broker' && h.broker) vals = h.broker;
-  else if (scope === 'crypto' && h.broker) vals = h.value.map((v, i) => (v == null || h.broker[i] == null) ? null : v - h.broker[i]);
+  else if (scope === 'broker' && h[BK]) vals = h[BK];
+  else if (scope === 'crypto' && h[BK]) vals = h.value.map((v, i) => (v == null || h[BK][i] == null) ? null : v - h[BK][i]);
   else return null;
   const out = [];
   for (let i = 0; i < h.dates.length; i++) {
@@ -1380,7 +1389,7 @@ function realHistory(scope) {
 }
 function realReason() {
   if (INTERVALS[state.interval].intraday) return 'lo storico reale è giornaliero: usa 1G o 1S';
-  if (state.scope === 'custom') return 'lo storico reale esiste solo per Tutto, Broker e Crypto';
+  if (state.scope === 'custom') return `lo storico reale esiste solo per Tutto, ${BROKER} e Crypto`;
   if (!realHistory(state.scope)) return 'questo file non ha lo storico reale per questa vista (arriva con il prossimo aggiornamento del brief)';
   return '';
 }
@@ -1594,7 +1603,7 @@ function renderNetWorth(portfolioTotal) {
   box.title = `Investimenti ${fmtUsd(portfolioTotal, 2)} a prezzi in tempo reale (CD e liquidità inclusi) + conti ${fmtUsd(bank, 2)}` +
     (eurRate ? `. Euro al cambio EURUSD ${eurRate.toFixed(4)}` : '') + (invested ? `. Quota investita: ${invested.replace(' investito', '')} del patrimonio` : '');
 }
-/** Closed positions relevant to the current view (all of them are Broker lines). */
+/** Closed positions relevant to the current view (all of them are broker lines). */
 function scopeClosed() {
   const closed = state.snap.closed || [];
   if (state.scope === 'crypto') return closed.filter((c) => (bySym(c.symbol) || {}).kind === 'crypto');
@@ -1706,7 +1715,7 @@ function scopeFlows() {
   if (state.scope === 'custom') return { why: 'I flussi di cassa sono per conto, non per titolo: il TIR di una selezione di simboli non è calcolabile' };
   const f = state.snap.flows;
   if (f) {
-    const am = (f.broker || []).map(([d, a]) => ({ d, a }));
+    const am = (f[BK] || []).map(([d, a]) => ({ d, a }));
     const cr = (f.crypto || []).map(([d, , a]) => ({ d, a }));
     return { list: state.scope === 'broker' ? am : state.scope === 'crypto' ? cr : am.concat(cr), src: 'flussi del Portfolio Brief' };
   }
@@ -1744,7 +1753,7 @@ function renderIrr() {
   const el = $('k-irr'), box = el.parentElement;
   const st = irrStats();
   const m = state.snap.mwr;
-  const refKey = { all: 'total', broker: 'broker', crypto: 'crypto' }[state.scope];
+  const refKey = { all: 'total', broker: BK, crypto: 'crypto' }[state.scope];
   const ref = m && refKey && m[refKey] != null && isFinite(m[refKey]) ? m[refKey] : null;
   const refAsof = (m && m.asof) || state.snap.asof;
   if (st.why) {
@@ -1769,9 +1778,9 @@ function renderIrr() {
 /** Value series of the current view from the snapshot's daily history; null when the history cannot isolate it. */
 function scopeHistoryValues(h) {
   if (state.scope === 'all') return h.value;
-  if (!h.broker) return null;
-  if (state.scope === 'broker') return h.broker;
-  if (state.scope === 'crypto') return h.value.map((v, i) => (v == null || h.broker[i] == null ? null : v - h.broker[i]));
+  if (!h[BK]) return null;
+  if (state.scope === 'broker') return h[BK];
+  if (state.scope === 'crypto') return h.value.map((v, i) => (v == null || h[BK][i] == null ? null : v - h[BK][i]));
   return null;
 }
 /** Index of the first ISO date in the sorted array that is >= d (dates.length when none). */
@@ -1783,7 +1792,7 @@ function firstOnOrAfter(dates, d) {
 /**
  * TWR index of the current view over the snapshot's history, chained day by day with the brief's
  * modified Dietz formula: r = (V_t - V_t-1 - F_t) / (V_t-1 + F_t / 2), F_t = net external flows of day t.
- * Broker flows come per history day from the brief (history.flow_broker, 0.8.1+), where
+ * Broker flows come per history day from the brief (history['flow_' + BK], 0.8.1+), where
  * securities received enter at market value; crypto lots land on the first history day on or after
  * their date. Flows dated after the last history day are kept for the live step.
  * Depends only on the snapshot and the view, so it is cached.
@@ -1800,17 +1809,17 @@ function buildTwrBase() {
   const h = state.snap.history;
   if (!h || !h.dates || !h.dates.length || !h.value) return { why: 'Lo snapshot non contiene la serie storica del valore' };
   const vals = scopeHistoryValues(h);
-  if (!vals) return { why: 'La serie storica di questo snapshot non separa Broker e crypto' };
+  if (!vals) return { why: `La serie storica di questo snapshot non separa ${BROKER} e crypto` };
   const f = state.snap.flows;
-  if (!f || !h.flow_broker || h.flow_broker.length !== h.dates.length) {
+  if (!f || !h['flow_' + BK] || h['flow_' + BK].length !== h.dates.length) {
     return { why: 'Questo snapshot non ha i flussi giornalieri della serie storica: arrivano con il Portfolio Brief 0.8.1. Senza, i titoli ricevuti in regalo sembrerebbero rendimento.' };
   }
   const dates = h.dates.map((d) => String(d).slice(0, 10));
   const n = dates.length, flow = new Array(n).fill(0), lastDay = dates[n - 1];
   let pending = 0;
   if (state.scope !== 'crypto') {
-    h.flow_broker.forEach((a, i) => { flow[i] += a || 0; });
-    for (const [d, a] of f.broker || []) if (String(d).slice(0, 10) > lastDay) pending += a;
+    h['flow_' + BK].forEach((a, i) => { flow[i] += a || 0; });
+    for (const [d, a] of f[BK] || []) if (String(d).slice(0, 10) > lastDay) pending += a;
   }
   if (state.scope !== 'broker') {
     for (const [d, , a] of f.crypto || []) {
@@ -1876,7 +1885,7 @@ function renderTwr() {
 function benchStats(t) {
   const bm = state.snap.benchmark, h = state.snap.history;
   if (!bm || !h || !h.bench || h.bench.length !== h.dates.length) return { why: 'Il benchmark arriva con lo snapshot del Portfolio Brief 0.9.0' };
-  if (state.scope === 'crypto' || state.scope === 'custom') return { why: 'Il benchmark a pari rischio vale per il portafoglio intero e per il conto Broker' };
+  if (state.scope === 'crypto' || state.scope === 'custom') return { why: `Il benchmark a pari rischio vale per il portafoglio intero e per il conto ${BROKER}` };
   if (t.why) return { why: t.why };
   const B = h.bench, n = B.length, b = t.base;
   let factor = 0, live = true;
@@ -2258,17 +2267,17 @@ function rowsToPositions(hdr, rows) {
   }));
 }
 function historyFromRows(hdr, rows) {
-  const d = headerIndex(hdr, ['Data']), v = headerIndex(hdr, ['Valore del portafoglio']), c = headerIndex(hdr, ['Contributi netti']), a = headerIndex(hdr, ['Broker']);
+  const d = headerIndex(hdr, ['Data']), v = headerIndex(hdr, ['Valore del portafoglio']), c = headerIndex(hdr, ['Contributi netti']), a = headerIndex(hdr, [BROKER]);
   if (d < 0 || v < 0) return null;
   const toIso = (x) => x instanceof Date ? x.toISOString().slice(0, 10) : String(x).slice(0, 10);
   const num = (x) => { if (typeof x === 'number') return x; const m = String(x ?? '').match(/^=(-?\d+)\/(\d+)$/); if (m) return +m[1] / +m[2]; const t = String(x ?? '').replace(',', '.'); return t === '' ? NaN : +t; };
-  const out = { dates: [], value: [], contrib: [], broker: a >= 0 ? [] : undefined };
+  const out = { dates: [], value: [], contrib: [], [BK]: a >= 0 ? [] : undefined };
   for (const r of rows) {
     if (!r || r[d] == null || !isFinite(num(r[v]))) continue;
     out.dates.push(toIso(r[d])); out.value.push(num(r[v])); out.contrib.push(c >= 0 ? num(r[c]) : NaN);
-    if (a >= 0) out.broker.push(num(r[a]));
+    if (a >= 0) out[BK].push(num(r[a]));
   }
-  if (!out.broker) delete out.broker;
+  if (!out[BK]) delete out[BK];
   return out.dates.length ? out : null;
 }
 /** Parse a number written by the brief: plain, "=a/b" (Drive-safe) or with a decimal comma. */
@@ -2444,7 +2453,7 @@ return {
 /* Loader: connection settings, snapshot download and cache, then starts the tracker. */
 (() => {
 'use strict';
-const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra' };
+const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra', labels: 'pt.labels' };
 const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
 const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 const el = (id) => document.getElementById(id);
@@ -2535,7 +2544,7 @@ function refresh() {
 function start() {
   el('boot-msg').hidden = true;
   el('connect').classList.remove('show');
-  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd, eurRate });
+  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd, eurRate, labels: labels || {} });
   renderWallet();
   refreshWallet();
 }
@@ -2572,7 +2581,7 @@ el('connect-form').addEventListener('submit', async (ev) => {
     remote = { etag: r.etag, modified: r.modified, checkedAt: Date.now(), snap: r.snap };
     write(LS.remote, remote);
     if (hadApp && configChanged) { location.reload(); return; }
-    if (hadApp) { app.applyRemote(r.snap); el('connect').classList.remove('show'); } else start();
+    if (hadApp) { app.applyRemote(r.snap); el('connect').classList.remove('show'); } else { if (!labels) await loadLabels(); start(); }
   } catch (err) {
     setMsg(errorText(err), true);
   } finally { btn.disabled = false; btn.textContent = 'Collega'; }
@@ -2895,7 +2904,7 @@ el('plaid-link').onclick = () => openPlaid(null);
 /** Read-only check of Plaid's institution list: links nothing and uses no Item. */
 el('plaid-search').onclick = async () => {
   if (!conn) return;
-  const q = (prompt('Nome dell\'istituto da cercare in Plaid', 'Broker') || '').trim();
+  const q = (prompt('Nome dell\'istituto da cercare in Plaid', '') || '').trim();
   if (q.length < 2) return;
   plaidMsg('Cerco…');
   try {
@@ -2976,15 +2985,41 @@ el('wallet-refresh').onclick = async () => {
     : 'Nessuna novità da Wallet: apri l\'app Wallet per far sincronizzare le banche, poi riprova.';
 };
 
+// ---------- private labels (e.g. the broker's real name), served by the Worker from its KV ----------
+let labels = read(LS.labels);   // { broker, brokerKey }
+/** Downloads the labels; resolves true when they changed. Never throws. */
+async function loadLabels() {
+  if (!conn) return false;
+  try {
+    const res = await fetch(conn.url + '/labels', { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' });
+    const out = await res.json().catch(() => null);
+    if (!res.ok || !out || !out.ok || !out.labels) return false;
+    const changed = JSON.stringify(out.labels) !== JSON.stringify(labels || {});
+    labels = out.labels;
+    write(LS.labels, labels);
+    return changed;
+  } catch { return false; }
+}
+
 // ---------- boot ----------
 if (remote && !validSnap(remote.snap)) remote = null;
 if (conn && !(typeof conn.token === 'string' && cleanUrl(conn.url) === conn.url)) conn = null;
-if (remote) {
+if (remote && labels) {
   start();            // open at once on the cached copy, then look for a newer one
   refresh();
+  loadLabels().then((changed) => { if (changed) location.reload(); });
+} else if (remote) {
+  loadLabels().finally(() => { start(); refresh(); });
 } else if (conn) {
   el('boot-msg').hidden = false;
-  refresh().then((r) => { if (remote) start(); else { el('boot-msg').hidden = true; openConnect(r.text); } });
+  refresh().then(async (r) => {
+    if (remote) {
+      const had = !!labels;
+      if (!had) await loadLabels();
+      start();
+      if (had) loadLabels().then((changed) => { if (changed) location.reload(); });
+    } else { el('boot-msg').hidden = true; openConnect(r.text); }
+  });
 } else {
   openConnect();
 }

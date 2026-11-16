@@ -18,6 +18,7 @@
  *   PLAID_CLIENT_ID text      Plaid client id (optional: without the Plaid trio /wallet is Wallet only)
  *   PLAID_SECRET    secret    Plaid secret for PLAID_ENV
  *   PLAID_ENV       text      optional, "production" (default) or "sandbox"
+ *   PLAID_COUNTRY_CODES text  comma-separated Plaid country codes for Link and the institution search
  *   PLAID_KV        KV        namespace holding the Plaid access tokens, one key per linked bank
  *
  * Endpoints:
@@ -35,6 +36,9 @@
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
  *   POST /accounts/rename    {id, name} -> custom display name for an account, kept in PLAID_KV
  *                            ("names") so every device shows it; an empty name restores the original
+ *   GET  /labels             private display labels kept in PLAID_KV ("labels"), e.g. the broker's
+ *                            name and the snapshot's field name for it, so the public code uses
+ *                            placeholders only
  *   GET  /plaid/institutions?q=<name>  read-only search of Plaid's institution list, with the
  *                            products each one supports; links nothing and uses no Item
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
@@ -81,10 +85,14 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (path !== "/check" && path !== "/wallet" && path !== "/plaid/institutions" && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (path !== "/check" && path !== "/wallet" && path !== "/labels" && path !== "/plaid/institutions" && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
       if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1"), 200, cors);
+      if (path === "/labels") {
+        const labels = env.PLAID_KV ? await env.PLAID_KV.get("labels", "json").catch(() => null) : null;
+        return json({ ok: true, labels: labels && typeof labels === "object" ? labels : {} }, 200, cors);
+      }
       if (path === "/plaid/institutions") {
         if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
         return json(await plaidInstitutions(env, url.searchParams.get("q")), 200, cors);
@@ -486,6 +494,13 @@ const PLAID_POST_ROUTES = { "/plaid/link-token": plaidLinkToken, "/plaid/exchang
 
 const plaidConfigured = (env) => !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.PLAID_KV);
 
+/** Country codes for Plaid Link and the institution search, from PLAID_COUNTRY_CODES (kept out of the code). */
+function plaidCountries(env) {
+  const codes = String(env.PLAID_COUNTRY_CODES || "").split(",").map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c));
+  if (!codes.length) throw new HttpError(500, "plaid_countries_not_configured", "set PLAID_COUNTRY_CODES, e.g. a comma-separated list of country codes");
+  return codes;
+}
+
 async function plaidCall(env, path, body) {
   const host = PLAID_HOSTS[(env.PLAID_ENV || "production").trim()] || PLAID_HOSTS.production;
   const res = await fetch(host + path, {
@@ -511,7 +526,7 @@ async function plaidItems(env) {
 
 /** Link token for Plaid Link: a new bank, or update mode for an already linked one (itemId). */
 async function plaidLinkToken(env, input) {
-  const body = { client_name: "Portfolio Tracker", language: "en", country_codes: PLAID_COUNTRY_CODES, user: { client_user_id: "owner" } };
+  const body = { client_name: "Portfolio Tracker", language: "en", country_codes: plaidCountries(env), user: { client_user_id: "owner" } };
   if (input.itemId) {
     const item = await env.PLAID_KV.get(PLAID_ITEM_PREFIX + String(input.itemId), "json");
     if (!item) throw new HttpError(404, "plaid_item_not_found", "no linked bank with this id");
@@ -741,7 +756,7 @@ async function plaidInstitutions(env, query) {
   if (q.length < 2) throw new HttpError(400, "bad_request", "q must have at least 2 characters");
   const data = await plaidCall(env, "/institutions/search", {
     query: q,
-    country_codes: PLAID_COUNTRY_CODES,
+    country_codes: plaidCountries(env),
     products: null,
     options: { include_optional_metadata: false },
   });
