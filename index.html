@@ -2739,7 +2739,15 @@ function renderWallet() {
   }
   const parts = [];
   if (d) {
-    parts.push(`Dati di Wallet modificati il ${fmtWhen(Date.parse(d.dataChangedAt))}, scaricati il ${fmtWhen(wallet.fetchedAt)}.`);
+    if (d.wallet && !d.wallet.ok) {
+      const e = d.wallet.error || {};
+      parts.push(`Wallet non risponde (${e.code || 'errore'}): i conti Plaid sono aggiornati, ` + (d.wallet.staleSince
+        ? `the Wallet-only bank e gli altri conti W/M sono all'ultima lettura riuscita del ${fmtWhen(Date.parse(d.wallet.staleSince))}.`
+        : 'the Wallet-only bank e gli altri conti W/M non sono disponibili e mancano dai totali.'));
+    }
+    parts.push(d.dataChangedAt
+      ? `Dati di Wallet modificati il ${fmtWhen(Date.parse(d.dataChangedAt))}, scaricati il ${fmtWhen(wallet.fetchedAt)}.`
+      : `Scaricati il ${fmtWhen(wallet.fetchedAt)}.`);
     parts.push(d.pendingIncluded
       ? 'Conti collegati con Plaid: saldo della banca con i movimenti in sospeso inclusi; gli altri dai movimenti registrati in Wallet.'
       : 'Saldi calcolati da Wallet sui movimenti registrati.');
@@ -2750,7 +2758,7 @@ function renderWallet() {
   if (walletErr) parts.push(`Aggiornamento non riuscito: ${walletErr}.`);
   el('wallet-info').textContent = parts.join(' ');
   renderPlaidItems(d && d.plaid);
-  el('wallet-info').classList.toggle('down', !!walletErr && !d);
+  el('wallet-info').classList.toggle('down', (!!walletErr && !d) || !!(d && d.wallet && !d.wallet.ok));
 }
 
 /**
