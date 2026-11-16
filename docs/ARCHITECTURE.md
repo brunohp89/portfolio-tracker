@@ -198,6 +198,11 @@ sequenceDiagram
   P->>P: Patrimonio totale = portfolio at live prices (CD and cash included) + accounts total USD
 ```
 
+**Custom names:** the ✎ next to each account renames it for every device (`POST /accounts/rename`,
+stored in `PLAID_KV` under `names`, keyed by the account id in `/wallet`; an empty name restores the
+original, still shown in the tooltip). Names are applied last, so `CREDIT_LIMITS` and the Wallet/Plaid
+matching keep using the original names. The local manual account is renamed in the browser only.
+
 Per-account source tags in the table: **P** = Plaid (live bank balance, pending included),
 **W** = Wallet bank sync, **M** = entered by hand (Wallet cash accounts or the local manual account).
 

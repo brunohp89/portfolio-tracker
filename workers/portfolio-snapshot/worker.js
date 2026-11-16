@@ -33,6 +33,8 @@
  *   POST /plaid/link-token   {itemId?, redirectUri?} -> {linkToken} to open Plaid Link
  *                            (itemId = update mode, to re-authorise a linked bank)
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
+ *   POST /accounts/rename    {id, name} -> custom display name for an account, kept in PLAID_KV
+ *                            ("names") so every device shows it; an empty name restores the original
  *   GET  /plaid/institutions?q=<name>  read-only search of Plaid's institution list, with the
  *                            products each one supports; links nothing and uses no Item
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
@@ -67,6 +69,10 @@ export default {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
       const url = new URL(request.url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
+      if (request.method === "POST" && path === "/accounts/rename") {
+        await requireToken(request, env);
+        return json(await renameAccount(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
+      }
       if (request.method === "POST" && PLAID_POST_ROUTES[path]) {
         await requireToken(request, env);
         if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
@@ -431,6 +437,12 @@ async function walletSummary(env, force) {
   const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits)]);
   const fx = yfx || (walletError ? null : await walletEurUsd(env, kept));
   const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
+  // Custom names last, so CREDIT_LIMITS and the Wallet/Plaid matching keep using the original names.
+  const names = await loadNames(env);
+  for (const a of accounts) {
+    const custom = names[a.id] || (a.walletId && names[a.walletId]);
+    if (custom) { a.originalName = a.name; a.name = custom; }
+  }
 
   const byCurrency = {};
   for (const a of accounts) byCurrency[a.currency] = round2((byCurrency[a.currency] || 0) + a.balance);
@@ -679,4 +691,29 @@ async function plaidInstitutions(env, query) {
       oauth: !!i.oauth,
     })),
   };
+}
+
+// ---------- Custom account names (shared by every device) ----------
+
+const NAMES_KEY = "names";
+const NAME_MAX = 60;
+
+async function loadNames(env) {
+  if (!env.PLAID_KV) return {};
+  const names = await env.PLAID_KV.get(NAMES_KEY, "json").catch(() => null);
+  return names && typeof names === "object" ? names : {};
+}
+
+/** Sets (or, with an empty name, clears) the display name of one account, by its /wallet id. */
+async function renameAccount(env, input) {
+  if (!env.PLAID_KV) throw new HttpError(500, "names_not_configured", "the PLAID_KV binding is needed to store account names");
+  const id = typeof input.id === "string" ? input.id.trim().slice(0, 200) : "";
+  if (!id) throw new HttpError(400, "bad_request", "id missing");
+  const name = typeof input.name === "string" ? input.name.replace(/\s+/g, " ").trim().slice(0, NAME_MAX) : "";
+  const names = await loadNames(env);
+  if (name) names[id] = name;
+  else delete names[id];
+  await env.PLAID_KV.put(NAMES_KEY, JSON.stringify(names));
+  walletCache = { at: 0, body: null };
+  return { ok: true, id, name: name || null };
 }
