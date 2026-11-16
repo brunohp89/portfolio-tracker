@@ -2776,8 +2776,8 @@ function renderWallet() {
     if (d.wallet && !d.wallet.ok) {
       const e = d.wallet.error || {};
       parts.push(`Wallet non risponde (${e.code || 'errore'}): i conti Plaid sono aggiornati, ` + (d.wallet.staleSince
-        ? `the Wallet-only bank e gli altri conti W/M sono all'ultima lettura riuscita del ${fmtWhen(Date.parse(d.wallet.staleSince))}.`
-        : 'the Wallet-only bank e gli altri conti W/M non sono disponibili e mancano dai totali.'));
+        ? `i conti W/M sono all'ultima lettura riuscita del ${fmtWhen(Date.parse(d.wallet.staleSince))}.`
+        : 'i conti W/M non sono disponibili e mancano dai totali.'));
     }
     parts.push(d.dataChangedAt
       ? `Dati di Wallet modificati il ${fmtWhen(Date.parse(d.dataChangedAt))}, scaricati il ${fmtWhen(wallet.fetchedAt)}.`
