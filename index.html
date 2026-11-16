@@ -122,7 +122,8 @@ footer a{color:#8fb0ff}
 #wallet-actions{padding:8px 10px 0}
 #extra-form{padding:10px 10px 0}
 #extra-form input,#extra-form select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit}
-#extra-name{flex:1 1 160px;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
+#extra-name{flex:1 1 100%;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
+#extra-sign{padding:6px 12px;font-family:var(--mono);font-size:15px}
 #extra-hint{padding:4px 10px 0}
 @media (max-width:700px){#wallet-wrap td.l{max-width:150px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}}
 </style>
@@ -213,6 +214,7 @@ footer a{color:#8fb0ff}
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
     <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
+    <button class="btn sec" type="button" id="extra-sign" title="Cambia segno (per un debito)" aria-label="Cambia segno">±</button>
     <input id="extra-amount" type="text" inputmode="decimal" placeholder="Importo" aria-label="Importo">
     <select id="extra-cur" aria-label="Valuta"><option>USD</option><option>EUR</option></select>
     <button class="btn sec" type="submit">Salva</button>
@@ -2623,7 +2625,7 @@ function bankTotalUsd() {
 
 /** Accepts 1250.5, 1250,5, 1.250,50 and 1,250.50: the last separator is the decimal one. */
 function parseAmount(text) {
-  let t = String(text || '').trim().replace(/[\s'€$]/g, '');
+  let t = String(text || '').trim().replace(/[\s'€$]/g, '').replace(/^[−–]/, '-');
   const dec = Math.max(t.lastIndexOf(','), t.lastIndexOf('.'));
   if (dec >= 0) t = t.slice(0, dec).replace(/[.,]/g, '') + '.' + t.slice(dec + 1);
   return t;
@@ -2646,6 +2648,12 @@ el('extra-form').addEventListener('submit', (ev) => {
   el('extra-hint').textContent = extra ? 'Salvato in questo browser.' : 'Conto manuale rimosso.';
   fillExtraForm(); renderWallet();
 });
+// Phone decimal keypads have no minus key: this button flips the sign of the amount.
+el('extra-sign').onclick = () => {
+  const input = el('extra-amount');
+  const v = input.value.trim();
+  input.value = /^[-−–]/.test(v) ? v.replace(/^[-−–]\s*/, '') : '-' + v;
+};
 el('extra-clear').onclick = () => { el('extra-amount').value = ''; el('extra-form').requestSubmit(); };
 fillExtraForm();
 
