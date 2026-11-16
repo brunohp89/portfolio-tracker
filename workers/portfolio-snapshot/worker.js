@@ -417,6 +417,10 @@ async function walletSummary(env, force) {
   const age = Date.now() - walletCache.at;
   if (walletCache.body && age < (force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS)) return walletCache.body;
   const plaidOn = plaidConfigured(env);
+  const limits = creditLimitOverrides(env);
+  // Plaid and FX run alongside Wallet: the slowest source sets the response time, not their sum.
+  const sidePromise = Promise.all([yahooEurUsd(), plaidSummary(env, limits, force)]);
+  sidePromise.catch(() => {}); // awaited below; avoids an unhandled rejection on the early returns
 
   let all = null;
   let headers = null;
@@ -444,8 +448,7 @@ async function walletSummary(env, force) {
     walletStale = last.accounts ? new Date(last.at).toISOString() : null;
   }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
-  const limits = creditLimitOverrides(env);
-  const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits, force)]);
+  const [yfx, plaid] = await sidePromise;
   const fx = yfx || (walletError ? null : await walletEurUsd(env, kept));
   const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
   // Custom names last, so CREDIT_LIMITS and the Wallet/Plaid matching keep using the original names.
@@ -501,13 +504,23 @@ function plaidCountries(env) {
   return codes;
 }
 
-async function plaidCall(env, path, body) {
+async function plaidCall(env, path, body, timeoutMs) {
   const host = PLAID_HOSTS[(env.PLAID_ENV || "production").trim()] || PLAID_HOSTS.production;
-  const res = await fetch(host + path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "PLAID-CLIENT-ID": env.PLAID_CLIENT_ID.trim(), "PLAID-SECRET": env.PLAID_SECRET.trim() },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(host + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "PLAID-CLIENT-ID": env.PLAID_CLIENT_ID.trim(), "PLAID-SECRET": env.PLAID_SECRET.trim() },
+      body: JSON.stringify(body),
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+    });
+  } catch (e) {
+    if (!(e && (e.name === "TimeoutError" || e.name === "AbortError"))) throw e;
+    const err = new HttpError(504, "plaid_timeout", `Plaid did not answer ${path} within ${timeoutMs / 1000} s`);
+    err.plaidCode = "TIMEOUT";
+    err.plaidMessage = err.message;
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new HttpError(502, "plaid_error", `${data.error_code || res.status}: ${data.error_message || "Plaid refused the request"}`);
@@ -567,7 +580,7 @@ async function plaidTxRefresh(env, item, prev, today) {
     return { at, blockedUntil, error: (prev && prev.txRefreshError) || null };
   }
   try {
-    await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken });
+    await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS);
     return { at: today, blockedUntil: 0, error: null, requested: true };
   } catch (err) {
     const error = { code: err.plaidCode || "plaid_error", message: err.plaidMessage || String(err.message) };
@@ -595,27 +608,34 @@ async function plaidItemData(env, item, prev, force) {
   const reuseLive = !!(prev && prev.ok && prev.balanceLive && prev.raw && prev.raw.length && today - lastLive < PLAID_LIVE_MIN_MS);
   const tryLive = !reuseLive && today >= blockedUntil && today - lastLive >= PLAID_LIVE_MIN_MS;
   let liveError = null;
+  const ms = {};
+  const timed = (key, promise) => {
+    const t0 = Date.now();
+    return promise.finally(() => { ms[key] = Date.now() - t0; });
+  };
   const balanceRead = (async () => {
     if (reuseLive) return { data: { accounts: prev.raw }, live: true, reused: true };
     if (tryLive) {
+      // The real-time read waits for the bank and can take tens of seconds: past PLAID_LIVE_TIMEOUT_MS
+      // Plaid's cached balances are used instead (no block: the next read tries live again).
       try {
-        return { data: await plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }), live: true };
+        return { data: await timed("live", plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }, PLAID_LIVE_TIMEOUT_MS)), live: true };
       } catch (err) {
         liveError = err;
       }
     }
-    return { data: await plaidCall(env, "/accounts/get", { access_token: item.accessToken }), live: false };
+    return { data: await timed("cached", plaidCall(env, "/accounts/get", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS)), live: false };
   })();
   const [balRead, tx, itemInfo, refresh] = await Promise.allSettled([
     balanceRead,
-    plaidCall(env, "/transactions/get", {
+    timed("tx", plaidCall(env, "/transactions/get", {
       access_token: item.accessToken,
       start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
       end_date: isoDay(today + 86400000),
       options: { count: 500 },
-    }),
-    plaidCall(env, "/item/get", { access_token: item.accessToken }),
-    force ? plaidTxRefresh(env, item, prev, today) : Promise.resolve(null),
+    }, PLAID_CALL_TIMEOUT_MS)),
+    timed("item", plaidCall(env, "/item/get", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS)),
+    force ? timed("refresh", plaidTxRefresh(env, item, prev, today)) : Promise.resolve(null),
   ]);
   // Last time Plaid refreshed this bank's data (balances from /accounts/get come from the same refresh).
   const txStatus = itemInfo.status === "fulfilled" && itemInfo.value.status && itemInfo.value.status.transactions;
@@ -647,6 +667,8 @@ async function plaidItemData(env, item, prev, force) {
     liveAt,
     liveBlockedUntil: liveError && liveError.plaidCode === "BALANCE_LIMIT" ? today + PLAID_LIVE_BLOCK_MS : blockedUntil,
     raw: live ? rawBalances(bal.value.accounts) : null,
+    liveTimedOut: !!(liveError && liveError.plaidCode === "TIMEOUT"),
+    ms, // duration of each Plaid call, for diagnosing slow refreshes
   };
   if (bal.status !== "fulfilled") {
     status.error = { code: bal.reason.plaidCode || "plaid_error", message: bal.reason.plaidMessage || String(bal.reason.message) };
@@ -733,6 +755,10 @@ const PLAID_CACHE_KEY = "plaid:summary";
 const PLAID_LIVE_MIN_MS = 5 * 60 * 1000;
 /** After a BALANCE_LIMIT answer, no real-time read for that Item during this window. */
 const PLAID_LIVE_BLOCK_MS = 60 * 60 * 1000;
+/** Longest wait for a real-time balance read before falling back to Plaid's cached balances. */
+const PLAID_LIVE_TIMEOUT_MS = 8 * 1000;
+/** Longest wait for any other Plaid call. */
+const PLAID_CALL_TIMEOUT_MS = 12 * 1000;
 /** At most one /transactions/refresh per Item in this window (Plaid allows 2/min and 120/hour). */
 const PLAID_TX_REFRESH_MIN_MS = 5 * 60 * 1000;
 /** When /transactions/refresh is refused as not enabled, it is not tried again for this long. */

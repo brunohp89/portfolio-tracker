@@ -2885,7 +2885,8 @@ async function refreshWallet(force) {
   if (!force && wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); return; }
   walletBusy = true;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 25000);
+  // The Worker bounds every Plaid call (live balance 8 s, others 12 s); Wallet runs alongside.
+  const timer = setTimeout(() => ctrl.abort(), 40000);
   try {
     let res;
     try {
