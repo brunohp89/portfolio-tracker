@@ -245,6 +245,10 @@ Balance rules:
   Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
   transactions, then the two guards below. The raw balances of a real-time read are kept in the
   shared cache (never sent to the app) so the transactions can be read again while that read is reused.
+  Real-time reads wait for the bank and can take 20 seconds or more: the Worker gives
+  `/accounts/balance/get` 8 seconds, then uses `/accounts/get` (no block, the next read tries live
+  again); every other Plaid call gets 12 seconds. Plaid and Yahoo run alongside Wallet, and the PWA
+  waits up to 40 seconds for `/wallet`. Each bank's status carries `ms`, the duration of each call.
 - **On-demand transaction refresh:** a forced read ("Aggiorna ora") also calls
   `/transactions/refresh` for each bank, at most once every 5 minutes per Item (Plaid allows 2 per
   minute and 120 per hour). Plaid fetches asynchronously, so the PWA reads `/wallet?fresh=1` again
