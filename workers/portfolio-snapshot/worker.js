@@ -304,7 +304,31 @@ async function walletAccounts(env) {
   return { accounts, headers };
 }
 
-/** EURUSD from Wallet's conversion of the latest EUR record (rate of that record's date). */
+const YAHOO_EURUSD = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=1d&range=5d";
+
+/** EURUSD from Yahoo Finance, the same source the brief uses; null if Yahoo does not answer. */
+async function yahooEurUsd() {
+  try {
+    const res = await fetch(YAHOO_EURUSD, {
+      headers: {
+        // Same headers as the yahoo-proxy Worker: Yahoo refuses requests without a browser agent.
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const meta = (await res.json()).chart.result[0].meta;
+    const rate = Number(meta.regularMarketPrice);
+    if (!(rate > 0.5 && rate < 2.5)) return null; // sanity bounds for EURUSD
+    const at = Number(meta.regularMarketTime) * 1000;
+    const iso = new Date(at || Date.now()).toISOString();
+    return { rate, asOf: iso.slice(0, 10), at: iso, source: "yahoo" };
+  } catch {
+    return null;
+  }
+}
+
+/** EURUSD from Wallet's conversion of the latest EUR record (rate of that record's date): fallback only. */
 async function walletEurUsd(env, accounts) {
   const ids = accounts.filter((a) => a.currencyCode === "EUR").map((a) => a.id).slice(0, 10);
   if (!ids.length) return null;
@@ -315,7 +339,7 @@ async function walletEurUsd(env, accounts) {
     });
     const rec = data.records && data.records[0];
     const rate = rec && rec.convertedAmount && Number(rec.convertedAmount.ratio);
-    return rate ? { rate, asOf: rec.recordDate.slice(0, 10) } : null;
+    return rate ? { rate, asOf: rec.recordDate.slice(0, 10), source: "wallet" } : null;
   } catch {
     return null;
   }
@@ -373,7 +397,8 @@ async function walletSummary(env, force) {
   }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
   const limits = creditLimitOverrides(env);
-  const [fx, plaid] = await Promise.all([walletEurUsd(env, kept), plaidSummary(env, limits)]);
+  const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits)]);
+  const fx = yfx || (await walletEurUsd(env, kept));
   const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
 
   const byCurrency = {};
