@@ -123,6 +123,7 @@ footer a{color:#8fb0ff}
 #wallet-wrap tfoot tr.grand td{background:#1d2b55;color:#fff;font-weight:600;border-top:1px solid #2b3d73}
 #wallet-wrap tfoot tr.grand td.num{font-size:14px}
 #wallet-wrap .alarm{margin-right:5px;cursor:help}
+#wallet-wrap .live{color:var(--up);font-size:9px;margin-right:4px;vertical-align:1px}
 #wallet-wrap th .sm{display:none}
 #wallet-info{padding:6px 10px 0}
 #wallet-actions{padding:8px 10px 0}
@@ -227,7 +228,7 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
-  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span></div>
+  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span><span><span class="live">●</span>saldo letto in tempo reale</span></div>
   <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
@@ -2728,7 +2729,13 @@ function renderWallet() {
       tr.append(name, bal);
       tr.append(creditCell(a.credit, a.currency));
       tr.append(cell(fmtDay(a.lastRecordDate), 'num last'));
-      const sync = cell(fmtSyncDay(a.lastSync), 'num sync');
+      const sync = cell('', 'num sync');
+      if (a.source === 'plaid' && a.balanceLive) {
+        const dot = document.createElement('span');
+        dot.className = 'live'; dot.textContent = '●';
+        sync.append(dot);
+      }
+      sync.append(fmtSyncDay(a.lastSync));
       if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? (a.balanceLive ? ' (saldo letto in tempo reale dalla banca)' : ' (saldo e movimenti dall\'ultimo aggiornamento di Plaid)') : ' (ultima modifica registrata da Wallet)');
       tr.append(sync);
       body.append(tr);
