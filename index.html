@@ -144,6 +144,7 @@ footer a{color:#8fb0ff}
 #wallet-wrap .ren:hover{color:var(--text)}
 #wallet-legend{padding:8px 10px 0;display:flex;flex-wrap:wrap;gap:4px 14px}
 #wallet-wrap .pend{display:block;font-size:11px;color:var(--warn);font-weight:400}
+#wallet-wrap .txu{display:block;font-size:10px;color:var(--muted);font-weight:400;white-space:nowrap}
 #plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
 #plaid-items .it{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 #plaid-items .bad{color:var(--down)}
@@ -237,7 +238,7 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
-  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span><span><span class="live">●</span>saldo letto in tempo reale</span></div>
+  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span><span><span class="live">●</span>saldo letto in tempo reale</span><span>mov.: movimenti aggiornati da Plaid</span></div>
   <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
@@ -2608,6 +2609,11 @@ let walletBusy = false;
 /** A bank-synced account not synced for longer than this gets the alarm icon. */
 const SYNC_ALARM_MS = 24 * 60 * 60 * 1000;
 const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
+/** Time if today, else the day: when Plaid last refreshed a bank's transactions (pending list included). */
+const fmtTxWhen = (iso) => {
+  const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }) : fmtSyncDay(iso);
+};
 
 const fmtMoney = (v, cur) => {
   if (v == null || !isFinite(v)) return '—';
@@ -2781,10 +2787,16 @@ function renderWallet() {
       ren.title = 'Rinomina'; ren.setAttribute('aria-label', 'Rinomina ' + a.name);
       ren.onclick = () => renameAccount(a);
       name.append(tag, ren);
-      if (a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS) {
+      const syncOld = a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS;
+      // Plaid: a fresh real-time balance can hide transactions (and pending items) not refreshed for days.
+      const txOld = a.source === 'plaid' && a.txUpdatedAt && today - Date.parse(a.txUpdatedAt) > SYNC_ALARM_MS;
+      if (syncOld || txOld) {
         const al = document.createElement('span');
         al.className = 'alarm'; al.textContent = '⚠️';
-        al.title = `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT')}: controlla il collegamento` + (a.source === 'plaid' ? ' in Plaid (Riconnetti)' : ' in Wallet');
+        al.title = (syncOld
+          ? `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT')}`
+          : `Movimenti non aggiornati da Plaid dal ${new Date(a.txUpdatedAt).toLocaleString('it-IT')}`)
+          + ': controlla il collegamento' + (a.source === 'plaid' ? ' in Plaid (Riconnetti)' : ' in Wallet');
         name.append(al);
       }
       name.append(a.name);
@@ -2814,6 +2826,13 @@ function renderWallet() {
       }
       sync.append(fmtSyncDay(a.lastSync));
       if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? (a.balanceLive ? ' (saldo letto in tempo reale dalla banca)' : ' (saldo e movimenti dall\'ultimo aggiornamento di Plaid)') : ' (ultima modifica registrata da Wallet)');
+      if (a.source === 'plaid' && a.txUpdatedAt) {
+        const tx = document.createElement('span');
+        tx.className = 'txu';
+        tx.textContent = 'mov. ' + fmtTxWhen(a.txUpdatedAt);
+        sync.append(tx);
+        sync.title += `. Movimenti e pending aggiornati da Plaid: ${new Date(a.txUpdatedAt).toLocaleString('it-IT')}`;
+      }
       tr.append(sync);
       body.append(tr);
     }
@@ -2986,6 +3005,13 @@ function renderPlaidItems(plaid) {
       ? `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}${it.pendingKnown ? '' : ', movimenti in sospeso non ancora disponibili'}`
       : `errore ${it.error && it.error.code}, mostro i dati di Wallet`);
     if (!it.ok) label.className = 'bad';
+    if (it.ok && it.txRefreshError) {
+      const w = document.createElement('span');
+      w.className = 'bad';
+      w.textContent = ` · aggiornamento movimenti su richiesta non disponibile (${it.txRefreshError.code})`;
+      w.title = it.txRefreshError.message || '';
+      label.append(w);
+    }
     row.append(label);
     if (!it.ok && it.error && /LOGIN|CONSENT|EXPIRED|PENDING_DISCONNECT|PENDING_EXPIRATION/.test(it.error.code || '')) {
       const b = document.createElement('button');
@@ -3022,7 +3048,10 @@ async function renameAccount(a) {
 }
 
 const FORCE_COOLDOWN_MS = 60 * 1000;
+/** Second forced read after asking Plaid to refresh the transactions (more than FORCE_COOLDOWN_MS). */
+const TX_RECHECK_MS = 90 * 1000;
 let lastForced = 0;
+let txRecheckTimer = 0;
 el('wallet-refresh').onclick = async () => {
   const btn = el('wallet-refresh'), out = el('wallet-refresh-msg');
   const wait = Math.ceil((lastForced + FORCE_COOLDOWN_MS - Date.now()) / 1000);
@@ -3036,6 +3065,17 @@ el('wallet-refresh').onclick = async () => {
   out.textContent = walletErr ? '' : after && after !== before
     ? 'Saldi aggiornati.'
     : 'Nessuna novità da Wallet: apri l\'app Wallet per far sincronizzare le banche, poi riprova.';
+  // Plaid fetches the transactions asynchronously after /transactions/refresh: read again shortly after.
+  const asked = !walletErr && ((wallet.data.plaid && wallet.data.plaid.items) || []).some((it) => it.txRefreshRequested);
+  if (asked) {
+    out.textContent += ` Chiesto a Plaid di riscaricare i movimenti: ricontrollo tra ${TX_RECHECK_MS / 1000} s.`;
+    clearTimeout(txRecheckTimer);
+    txRecheckTimer = setTimeout(async () => {
+      lastForced = Date.now();
+      await refreshWallet(true);
+      if (!walletErr) out.textContent = 'Movimenti di Plaid ricontrollati.';
+    }, TX_RECHECK_MS);
+  }
 };
 
 // ---------- private labels (e.g. the broker's real name), served by the Worker from its KV ----------

@@ -189,6 +189,7 @@ sequenceDiagram
       W->>K: list item:* (access tokens)
       W->>L: /accounts/balance/get (live, max 1 per 5 min per bank) or /accounts/get (cached), /item/get
       W->>L: /transactions/get (last 14 days, pending flags)
+      W->>L: /transactions/refresh (forced reads only, max 1 per 5 min per bank)
     end
     W->>W: drop Investment accounts, map Wallet accounts
     W->>W: Plaid accounts replace their Wallet twin (same currency + last 4 digits)
@@ -221,7 +222,10 @@ for Plaid accounts, and the Wallet account's `updatedAt` for Wallet bank-synced 
 "last sync" field; `updatedAt` moves on each sync round, so it is an approximation). A bank-synced
 account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—". A green dot before
 the sync date marks a Plaid balance read in real time (within the last 5 minutes); no dot means
-Plaid's cached balance.
+Plaid's cached balance. A real-time read says nothing about the transactions: the pending list only
+changes when Plaid refreshes the bank's transactions, so Plaid accounts show a second line under the
+date, "mov. HH:MM" (or the day if not today), with `last_successful_update` (`txUpdatedAt` in
+`/wallet`). The ⚠️ also appears when that time is older than 24 hours, even with a fresh balance.
 
 Per-account source tags in the table: **P** = Plaid (bank balance as of Plaid's latest refresh, pending included),
 **W** = Wallet bank sync, **M** = entered by hand (Wallet cash accounts or the local manual account).
@@ -239,7 +243,13 @@ Balance rules:
   `/accounts/get` in the same request and suspends real-time reads for that Item for 1 hour. The state
   (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes.
   Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
-  transactions, then the two guards below.
+  transactions, then the two guards below. The raw balances of a real-time read are kept in the
+  shared cache (never sent to the app) so the transactions can be read again while that read is reused.
+- **On-demand transaction refresh:** a forced read ("Aggiorna ora") also calls
+  `/transactions/refresh` for each bank, at most once every 5 minutes per Item (Plaid allows 2 per
+  minute and 120 per hour). Plaid fetches asynchronously, so the PWA reads `/wallet?fresh=1` again
+  90 seconds later. If Plaid refuses the call as not enabled for the account (it is an add-on), the
+  error is shown in the bank's status line and the call is not retried for 24 hours.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
@@ -320,7 +330,7 @@ logins of the household). One more bank is read only through Wallet.
 | Bank balances in the PWA | on open, on foreground, every 10 min; "Aggiorna ora" forces it (max once a minute) |
 | Worker `/wallet` cache | 10 min (1 min floor for forced reads), per Worker isolate |
 | Plaid balances | real time at most every 5 min per bank (`/accounts/balance/get`), otherwise Plaid's latest refresh (`/accounts/get`); Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min (1 min when forced) |
-| Plaid pending list | Plaid's own transaction updates, typically a few times a day |
+| Plaid pending list | Plaid's own transaction updates, typically a few times a day; "Aggiorna ora" asks for one now (`/transactions/refresh`, max once per 5 min per bank) |
 | Wallet (banks not linked through Plaid) | whenever Wallet syncs the bank; opening the Wallet app forces it; posted transactions only |
 
 ## 6. Configuration and secrets
