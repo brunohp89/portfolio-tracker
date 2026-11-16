@@ -256,33 +256,7 @@ sequenceDiagram
 If the redirect URI is not registered in the Plaid dashboard, the PWA retries without it and OAuth
 banks use a popup instead.
 
-Linked so far: Bank A, Bank B (checking and card), Bank C, Bank D (all with the Transactions
-product).
-
-### 4.5 Brokerage positions through Plaid Investments (Broker)
-
-- **"Collega investimenti"** opens the same Link flow with `products: ["investments"]`; the item is
-  stored with that product. Plaid lists Broker as "Broker Financial - My Financial Accounts",
-  "Broker Financial Brokerage" and "Alight - Broker Financial", all with `investments`.
-- `/wallet` shows an investment item as a status line only (accounts, positions, value). Its accounts
-  are **not** added to the bank totals: the portfolio already counts them.
-- `GET /plaid/holdings` returns each brokerage's accounts and holdings (ticker, CUSIP, type, quantity,
-  institution price and value, cost basis).
-- **"Confronta con il brief"** compares those holdings with the positions in the brief's snapshot:
-  quantities per ticker (equal, different, one side only), cash (`Sweep` vs cash equivalents) and
-  CDs/other untickered holdings by value. Crypto is excluded.
-- **Pending trades count as settled**, as in the brief (which treats the export's "Pending
-  Transactions" rows as confirmed). Plaid has no pending flag for investment transactions, and
-  whether holdings already include an unsettled trade depends on the institution, so
-  `/plaid/holdings` also returns the buys and sells of the last 10 days. A ticker whose gap equals
-  those recent trades (holdings plus recent trades = brief) is shown as aligned, noted
-  "operazione recente".
-- The brief's CSV ledger stays the source of truth (history since 2022, linked-account CD logic,
-  splits, deposit lots); Plaid is a check and a faster signal of position changes.
-- `GET /plaid/institutions?q=<name>` is a read-only lookup of Plaid's institution list with supported
-  products; it links nothing and uses no Item.
-
-### 4.6 Local-only features
+### 4.5 Local-only features
 
 - **Manual account** under the Conti table (name, amount, USD/EUR, a "±" button for debts): stored in
   `localStorage` (`pt.extra`), counted in the totals and in the net worth, only in that browser.
@@ -317,7 +291,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 | `PLAID_CLIENT_ID` | text | Plaid client id |
 | `PLAID_SECRET` | secret | Plaid Production secret |
 | `PLAID_ENV` | text, optional | `production` (default) or `sandbox` |
-| `PLAID_KV` | KV binding | namespace `portfolio-plaid`, one key `item:<item_id>` per linked institution (access token, institution, products) |
+| `PLAID_KV` | KV binding | namespace `portfolio-plaid`, one key `item:<item_id>` per linked bank |
 
 Elsewhere:
 

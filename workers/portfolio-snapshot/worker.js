@@ -30,11 +30,9 @@
  *                    ?fresh=1 skips the cache if it is older than WALLET_FORCE_MIN_MS.
  *                    Accounts linked through Plaid replace their Wallet twin (same last 4
  *                    digits) with the bank's live balance, pending transactions included.
- *   POST /plaid/link-token   {itemId?, redirectUri?, products?} -> {linkToken} to open Plaid Link;
- *                            products is ["transactions"] (banks, default) or ["investments"] (brokerages)
+ *   POST /plaid/link-token   {itemId?, redirectUri?} -> {linkToken} to open Plaid Link
  *                            (itemId = update mode, to re-authorise a linked bank)
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
- *   GET  /plaid/holdings     positions of the brokerages linked with the Investments product
  *   GET  /plaid/institutions?q=<name>  read-only search of Plaid's institution list, with the
  *                            products each one supports; links nothing and uses no Item
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
@@ -77,17 +75,13 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (path !== "/check" && path !== "/wallet" && path !== "/plaid/institutions" && path !== "/plaid/holdings" && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (path !== "/check" && path !== "/wallet" && path !== "/plaid/institutions" && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
       if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1"), 200, cors);
       if (path === "/plaid/institutions") {
         if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
         return json(await plaidInstitutions(env, url.searchParams.get("q")), 200, cors);
-      }
-      if (path === "/plaid/holdings") {
-        if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
-        return json(await plaidHoldings(env), 200, cors);
       }
       const describe = (file) => ({ id: file.id, name: file.name, modifiedTime: file.modifiedTime, size: Number(file.size) || null });
       if (path === "/check") {
@@ -450,8 +444,8 @@ async function plaidLinkToken(env, input) {
     if (!item) throw new HttpError(404, "plaid_item_not_found", "no linked bank with this id");
     body.access_token = item.accessToken;
   } else {
-    body.products = plaidProducts(input.products);
-    if (body.products.includes("transactions")) body.transactions = { days_requested: 30 };
+    body.products = ["transactions"];
+    body.transactions = { days_requested: 30 };
   }
   if (typeof input.redirectUri === "string" && /^https:\/\/[^\s]+$/.test(input.redirectUri)) body.redirect_uri = input.redirectUri;
   const data = await plaidCall(env, "/link/token/create", body);
@@ -467,7 +461,7 @@ async function plaidExchange(env, input) {
     institutionId = (await plaidCall(env, "/item/get", { access_token: ex.access_token })).item.institution_id || null;
   } catch { /* the name from Link is enough */ }
   const institutionName = typeof input.institutionName === "string" ? input.institutionName.slice(0, 80) : null;
-  const item = { itemId: ex.item_id, accessToken: ex.access_token, institutionId, institutionName, products: plaidProducts(input.products), linkedAt: new Date().toISOString() };
+  const item = { itemId: ex.item_id, accessToken: ex.access_token, institutionId, institutionName, linkedAt: new Date().toISOString() };
   await env.PLAID_KV.put(PLAID_ITEM_PREFIX + ex.item_id, JSON.stringify(item));
   walletCache = { at: 0, body: null };
   return { ok: true, itemId: ex.item_id, institutionName };
@@ -475,15 +469,8 @@ async function plaidExchange(env, input) {
 
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-/** Products a link may request: banks use Transactions, brokerages use Investments. */
-function plaidProducts(requested) {
-  return Array.isArray(requested) && requested.length === 1 && requested[0] === "investments" ? ["investments"] : ["transactions"];
-}
-const isInvestmentItem = (item) => Array.isArray(item.products) && item.products.includes("investments");
-
 /** Live balances (from the bank) and the pending transactions of one linked bank. */
 async function plaidItemData(env, item) {
-  if (isInvestmentItem(item)) return plaidInvestmentStatus(env, item);
   const today = Date.now();
   const [bal, tx] = await Promise.allSettled([
     plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }),
@@ -634,89 +621,4 @@ async function plaidInstitutions(env, query) {
       oauth: !!i.oauth,
     })),
   };
-}
-
-// ---------- Plaid Investments: brokerage positions (checked against the brief, not counted as cash) ----------
-
-function holdingsOf(data) {
-  const securities = new Map((data.securities || []).map((sec) => [sec.security_id, sec]));
-  const accounts = (data.accounts || []).map((a) => ({
-    id: a.account_id,
-    name: a.official_name || a.name,
-    mask: a.mask || null,
-    type: a.type,
-    subtype: a.subtype,
-    value: a.balances && a.balances.current != null ? round2(Number(a.balances.current)) : null,
-  }));
-  const holdings = (data.holdings || []).map((h) => {
-    const sec = securities.get(h.security_id) || {};
-    return {
-      account: h.account_id,
-      ticker: sec.ticker_symbol || null,
-      cusip: sec.cusip || null,
-      name: sec.name || null,
-      type: sec.type || null,
-      cash: !!sec.is_cash_equivalent || sec.type === "cash",
-      quantity: Number(h.quantity),
-      price: h.institution_price != null ? Number(h.institution_price) : null,
-      priceAsOf: h.institution_price_as_of || null,
-      value: h.institution_value != null ? round2(Number(h.institution_value)) : null,
-      costBasis: h.cost_basis != null ? round2(Number(h.cost_basis)) : null,
-      currency: h.iso_currency_code || "USD",
-    };
-  });
-  return { accounts, holdings };
-}
-
-/** Status line for /wallet: brokerage accounts are not bank accounts, so none is added to the totals. */
-async function plaidInvestmentStatus(env, item) {
-  const status = { itemId: item.itemId, institution: item.institutionName, kind: "investments", ok: true, error: null, pendingKnown: true, accounts: 0, holdings: 0, value: null };
-  try {
-    const { accounts, holdings } = holdingsOf(await plaidCall(env, "/investments/holdings/get", { access_token: item.accessToken }));
-    status.accounts = accounts.length;
-    status.holdings = holdings.length;
-    status.value = round2(accounts.reduce((s, a) => s + (a.value || 0), 0));
-  } catch (err) {
-    status.ok = false;
-    status.error = { code: err.plaidCode || "plaid_error", message: err.plaidMessage || String(err.message) };
-  }
-  return { status, accounts: [] };
-}
-
-/** Window of investment transactions returned with the holdings (pending trades live here). */
-const PLAID_RECENT_TRADE_DAYS = 10;
-
-/** Full positions of every brokerage linked with Investments, for the comparison with the brief. */
-async function plaidHoldings(env) {
-  const items = (await plaidItems(env)).filter(isInvestmentItem);
-  const out = await Promise.all(items.map(async (item) => {
-    try {
-      const today = Date.now();
-      const [hold, tx] = await Promise.allSettled([
-        plaidCall(env, "/investments/holdings/get", { access_token: item.accessToken }),
-        plaidCall(env, "/investments/transactions/get", {
-          access_token: item.accessToken,
-          start_date: isoDay(today - PLAID_RECENT_TRADE_DAYS * 86400000),
-          end_date: isoDay(today + 86400000),
-          options: { count: 500 },
-        }),
-      ]);
-      if (hold.status !== "fulfilled") throw hold.reason;
-      const securities = new Map((hold.value.securities || []).concat(tx.status === "fulfilled" ? tx.value.securities || [] : []).map((sec) => [sec.security_id, sec]));
-      // Recent trades, so the comparison can treat pending ones as already settled (as the brief does).
-      const recent = tx.status === "fulfilled" ? (tx.value.investment_transactions || []).map((t) => ({
-        account: t.account_id,
-        ticker: (securities.get(t.security_id) || {}).ticker_symbol || null,
-        date: t.date,
-        type: t.type,
-        subtype: t.subtype,
-        quantity: Number(t.quantity) || 0,
-        amount: Number(t.amount) || 0,
-      })) : null;
-      return { itemId: item.itemId, institution: item.institutionName, ok: true, ...holdingsOf(hold.value), recentTrades: recent, recentDays: PLAID_RECENT_TRADE_DAYS };
-    } catch (err) {
-      return { itemId: item.itemId, institution: item.institutionName, ok: false, error: { code: err.plaidCode || "plaid_error", message: err.plaidMessage || String(err.message) } };
-    }
-  }));
-  return { ok: true, generatedAt: new Date().toISOString(), items: out };
 }
