@@ -129,6 +129,8 @@ footer a{color:#8fb0ff}
 #wallet-wrap .tag.p{color:#26a69a;border-color:#1f5e57;background:rgba(38,166,154,.12)}
 #wallet-wrap .tag.w{color:#8fb0ff;border-color:#2b3d73;background:rgba(41,98,255,.12)}
 #wallet-wrap .tag.m{color:var(--muted);border-color:var(--line)}
+#wallet-wrap .ren{background:none;border:0;padding:0 6px 0 0;color:var(--muted);cursor:pointer;font-size:12px;vertical-align:1px}
+#wallet-wrap .ren:hover{color:var(--text)}
 #wallet-legend{padding:8px 10px 0;display:flex;flex-wrap:wrap;gap:4px 14px}
 #wallet-wrap .pend{display:block;font-size:11px;color:var(--warn);font-weight:400}
 #plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
@@ -2696,8 +2698,12 @@ function renderWallet() {
       const tag = document.createElement('span');
       tag.className = 'tag ' + kind;
       tag.textContent = kind.toUpperCase();
-      name.append(tag, a.name);
-      name.title = a.name + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
+      const ren = document.createElement('button');
+      ren.type = 'button'; ren.className = 'ren'; ren.textContent = '✎';
+      ren.title = 'Rinomina'; ren.setAttribute('aria-label', 'Rinomina ' + a.name);
+      ren.onclick = () => renameAccount(a);
+      name.append(tag, ren, a.name);
+      name.title = a.name + (a.originalName ? ` (nome originale: ${a.originalName})` : '') + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
       const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
       if (a.pending && a.pending.count) {
         const pd = a.pending;
@@ -2899,6 +2905,30 @@ function renderPlaidItems(plaid) {
     }
     box.append(row);
   }
+}
+
+/** Renames an account for every device (Worker), or the local manual account in this browser. */
+async function renameAccount(a) {
+  const input = prompt(`Nuovo nome per "${a.name}" (vuoto = nome originale${a.originalName ? ': ' + a.originalName : ''})`, a.name);
+  if (input === null) return;
+  const name = input.replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (a.local) {
+    extra = { ...extra, name: name || 'Conto manuale' };
+    write(LS.extra, extra); fillExtraForm(); renderWallet();
+    return;
+  }
+  try {
+    const r = await workerPost('/accounts/rename', { id: a.id, name });
+    // Show it at once; the next refresh brings the same name from the Worker on every device.
+    for (const acc of wallet.data.accounts) {
+      if (acc.id !== a.id) continue;
+      if (r.name) { acc.originalName = acc.originalName || acc.name; acc.name = r.name; }
+      else if (acc.originalName) { acc.name = acc.originalName; delete acc.originalName; }
+    }
+    write(LS.wallet, wallet);
+    renderWallet();
+    plaidMsg(r.name ? `Rinominato in "${r.name}".` : 'Ripristinato il nome originale.');
+  } catch (e) { plaidMsg('Rinomina non riuscita: ' + e.message, true); }
 }
 
 const FORCE_COOLDOWN_MS = 60 * 1000;
