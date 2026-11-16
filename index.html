@@ -119,6 +119,10 @@ footer a{color:#8fb0ff}
 #wallet-wrap tfoot td{border-bottom:0;font-weight:600}
 #wallet-wrap .stale{color:var(--warn)}
 #wallet-info{padding:6px 10px 0}
+#extra-form{padding:10px 10px 0}
+#extra-form input,#extra-form select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit}
+#extra-name{flex:1 1 160px;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
+#extra-hint{padding:4px 10px 0}
 @media (max-width:700px){#wallet-wrap td.l{max-width:150px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}}
 </style>
 </head>
@@ -205,6 +209,14 @@ footer a{color:#8fb0ff}
     <tfoot id="wallet-foot"></tfoot>
   </table>
   <div class="hint" id="wallet-info"></div>
+  <form class="row" id="extra-form" autocomplete="off">
+    <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
+    <input id="extra-amount" type="text" inputmode="decimal" placeholder="Importo" aria-label="Importo">
+    <select id="extra-cur" aria-label="Valuta"><option>USD</option><option>EUR</option></select>
+    <button class="btn sec" type="submit">Salva</button>
+    <button class="btn sec" type="button" id="extra-clear">Rimuovi</button>
+  </form>
+  <div class="hint" id="extra-hint">Salvato solo in questo browser: entra nei totali dei conti e nel patrimonio totale.</div>
 </details>
 
 <details class="tablewrap" id="closed-wrap" open>
@@ -2399,7 +2411,7 @@ return {
 /* Loader: connection settings, snapshot download and cache, then starts the tracker. */
 (() => {
 'use strict';
-const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet' };
+const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra' };
 const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
 const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 const el = (id) => document.getElementById(id);
@@ -2545,7 +2557,7 @@ const fmtMoney = (v, cur) => {
   return (v < 0 ? '−' : '') + sym + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 const fmtDay = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
-const ACCOUNT_ORDER = { CurrentAccount: 0, Savings: 1, CreditCard: 2, Cash: 3 };
+const ACCOUNT_ORDER = { CurrentAccount: 0, Savings: 1, CreditCard: 2, Cash: 3, Manual: 4 };
 const fmtWhole = (v, cur) => fmtMoney(v, cur).replace(/\.\d{2}$/, '');
 /** "owed / limit · pct" cell; the amounts are hidden on narrow screens, the percentage stays. */
 function creditCell(c, cur) {
@@ -2580,11 +2592,60 @@ function cell(text, cls) {
   return td;
 }
 
+/** Manual account kept only in this browser: { name, amount, currency }. */
+let extra = read(LS.extra);
+const validExtra = (x) => !!x && typeof x.amount === 'number' && isFinite(x.amount) && (x.currency === 'USD' || x.currency === 'EUR');
+if (!validExtra(extra)) extra = null;
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/** Worker totals plus the manual account (converted at Wallet's EURUSD rate). */
+function accountTotals(d) {
+  const t = d.totals || {};
+  const byCurrency = { ...(t.byCurrency || {}) };
+  let usd = isFinite(t.usd) ? t.usd : null, eur = isFinite(t.eur) ? t.eur : null;
+  if (extra) {
+    byCurrency[extra.currency] = round2((byCurrency[extra.currency] || 0) + extra.amount);
+    const rate = d.fx && d.fx.rate;
+    if (usd != null && rate) {
+      usd = round2(usd + (extra.currency === 'USD' ? extra.amount : extra.amount * rate));
+      eur = round2(usd / rate);
+    }
+  }
+  return { byCurrency, usd, eur };
+}
+
 /** Bank accounts total in USD for the net worth KPI; null until Wallet answered once. */
 function bankTotalUsd() {
-  const t = wallet && wallet.data && wallet.data.totals;
-  return t && isFinite(t.usd) ? t.usd : null;
+  return wallet && wallet.data ? accountTotals(wallet.data).usd : null;
 }
+
+/** Accepts 1250.5, 1250,5, 1.250,50 and 1,250.50: the last separator is the decimal one. */
+function parseAmount(text) {
+  let t = String(text || '').trim().replace(/[\s'€$]/g, '');
+  const dec = Math.max(t.lastIndexOf(','), t.lastIndexOf('.'));
+  if (dec >= 0) t = t.slice(0, dec).replace(/[.,]/g, '') + '.' + t.slice(dec + 1);
+  return t;
+}
+
+function fillExtraForm() {
+  el('extra-name').value = extra ? extra.name : '';
+  el('extra-amount').value = extra ? String(extra.amount) : '';
+  el('extra-cur').value = extra ? extra.currency : 'USD';
+}
+el('extra-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const raw = parseAmount(el('extra-amount').value);
+  if (!raw) { extra = null; } else {
+    const amount = Number(raw);
+    if (!isFinite(amount)) { el('extra-hint').textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; return; }
+    extra = { name: el('extra-name').value.trim() || 'Conto manuale', amount: round2(amount), currency: el('extra-cur').value };
+  }
+  if (extra) write(LS.extra, extra); else { try { localStorage.removeItem(LS.extra); } catch { /* storage unavailable */ } }
+  el('extra-hint').textContent = extra ? 'Salvato in questo browser.' : 'Conto manuale rimosso.';
+  fillExtraForm(); renderWallet();
+});
+el('extra-clear').onclick = () => { el('extra-amount').value = ''; el('extra-form').requestSubmit(); };
+fillExtraForm();
 
 function renderWallet() {
   if (app && app.bankChanged) app.bankChanged();
@@ -2596,12 +2657,16 @@ function renderWallet() {
   const d = wallet && wallet.data;
   if (d) {
     const today = Date.now();
-    const accounts = [...d.accounts].sort((a, b) =>
+    const rows = extra
+      ? [...d.accounts, { name: extra.name, type: 'Manual', currency: extra.currency, bankSync: false, balance: extra.amount, lastRecordDate: null, credit: null, local: true }]
+      : d.accounts;
+    const accounts = [...rows].sort((a, b) =>
       (a.currency === b.currency ? 0 : a.currency === 'USD' ? -1 : 1) ||
       ((ACCOUNT_ORDER[a.type] ?? 9) - (ACCOUNT_ORDER[b.type] ?? 9)) || a.name.localeCompare(b.name));
     for (const a of accounts) {
       const tr = document.createElement('tr');
-      const name = cell(a.name, 'l'); name.title = a.name + (a.bankSync ? '' : ' (inserito a mano)');
+      const name = cell(a.name, 'l');
+      name.title = a.name + (a.local ? ' (manuale, solo in questo browser)' : a.bankSync ? '' : ' (inserito a mano in Wallet)');
       tr.append(name, cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : '')));
       tr.append(creditCell(a.credit, a.currency));
       const last = cell(fmtDay(a.lastRecordDate), 'num last');
@@ -2611,7 +2676,7 @@ function renderWallet() {
       tr.append(last);
       body.append(tr);
     }
-    const t = d.totals || {};
+    const t = accountTotals(d);
     const addFoot = (label, value, creditTd) => {
       const tr = document.createElement('tr');
       tr.append(cell(label, 'l'), cell(value, 'num'), creditTd || cell('', 'num'), cell('', 'last'));
@@ -2629,7 +2694,7 @@ function renderWallet() {
   const parts = [];
   if (d) {
     parts.push(`Dati di Wallet modificati il ${fmtWhen(Date.parse(d.dataChangedAt))}, scaricati il ${fmtWhen(wallet.fetchedAt)}.`);
-    parts.push('Saldi dei movimenti contabilizzati, senza quelli in sospeso.');
+    parts.push('Saldi calcolati da Wallet sui movimenti registrati.');
     if (d.fx) parts.push(`Cambio EURUSD ${d.fx.rate.toFixed(4)} di Wallet al ${fmtDay(d.fx.asOf)}.`);
   }
   if (walletErr) parts.push(`Aggiornamento non riuscito: ${walletErr}.`);
