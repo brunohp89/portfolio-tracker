@@ -483,7 +483,11 @@ async function plaidItemData(env, item) {
   const pending = new Map();
   const lastPosted = new Map();
   if (tx.status === "fulfilled") {
-    for (const t of tx.value.transactions || []) {
+    const txs = tx.value.transactions || [];
+    // Guard 1: a posted transaction names the pending one it replaced; never count both.
+    const replaced = new Set(txs.filter((t) => !t.pending && t.pending_transaction_id).map((t) => t.pending_transaction_id));
+    for (const t of txs) {
+      if (t.pending && replaced.has(t.transaction_id)) continue;
       if (t.pending) {
         const p = pending.get(t.account_id) || { out: 0, count: 0 };
         p.out += Number(t.amount) || 0; // Plaid: positive amount = money leaving the account
@@ -507,7 +511,25 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const current = Number(b.current ?? b.available ?? 0);
   const posted = isCredit ? -current : current; // credit: Plaid's current is the amount owed
   const out = pend ? pend.out : 0;
-  const balance = round2(posted - out);
+  const computed = round2(posted - out);
+  // Guard 2: the bank's own figure that already includes pending items (credit: limit - available;
+  // depository: available). The true balance lies between posted and posted+pending, so the bank
+  // figure is clamped into that range: it can remove pending already counted by the bank, but never
+  // adds more than the listed pending (holds on a payment in flight would otherwise inflate debt).
+  let implied = null;
+  if (isCredit) {
+    if (b.limit != null && b.available != null) implied = -(Number(b.limit) - Number(b.available));
+  } else if (b.available != null) {
+    implied = Number(b.available);
+  }
+  let balance = computed;
+  let check = "unverified";
+  if (implied != null && isFinite(implied)) {
+    const clamped = Math.min(Math.max(posted, computed), Math.max(Math.min(posted, computed), implied));
+    if (Math.abs(implied - computed) < 0.005) check = "ok";
+    else if (Math.abs(clamped - computed) >= 0.005) { balance = round2(clamped); check = "adjusted"; }
+    else check = "differs";
+  }
   const acc = {
     id: "plaid:" + a.account_id,
     name: [item.institutionName, a.official_name || a.name].filter(Boolean).join(" · "),
@@ -519,7 +541,14 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
     bankSync: true,
     balance,
     postedBalance: round2(posted),
-    pending: { known: pendingKnown, amount: round2(-out), count: pend ? pend.count : 0 },
+    pending: {
+      known: pendingKnown,
+      amount: round2(balance - posted),
+      listed: round2(-out),
+      count: pend ? pend.count : 0,
+      check,
+      bankImplied: implied != null && isFinite(implied) ? round2(implied) : null,
+    },
     lastRecordDate: lastDate || null,
     credit: null,
   };
