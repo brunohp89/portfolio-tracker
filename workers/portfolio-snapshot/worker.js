@@ -512,24 +512,20 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const posted = isCredit ? -current : current; // credit: Plaid's current is the amount owed
   const out = pend ? pend.out : 0;
   const computed = round2(posted - out);
-  // Guard 2: the bank's own figure that already includes pending items (credit: limit - available;
-  // depository: available). The true balance lies between posted and posted+pending, so the bank
-  // figure is clamped into that range: it can remove pending already counted by the bank, but never
-  // adds more than the listed pending (holds on a payment in flight would otherwise inflate debt).
+  // Guard 2 (report only): compare with the bank's own figure that should include pending items
+  // (credit: limit - available; depository: available). Balances alone cannot tell "the bank already
+  // counts this pending" from "the bank's available figure ignores pending" (some card issuers do the
+  // latter), so a listed pending is never removed here: a mismatch is only reported. Pending items
+  // are dropped solely on hard evidence, i.e. guard 1 (pending_transaction_id).
   let implied = null;
   if (isCredit) {
     if (b.limit != null && b.available != null) implied = -(Number(b.limit) - Number(b.available));
   } else if (b.available != null) {
     implied = Number(b.available);
   }
-  let balance = computed;
+  const balance = computed;
   let check = "unverified";
-  if (implied != null && isFinite(implied)) {
-    const clamped = Math.min(Math.max(posted, computed), Math.max(Math.min(posted, computed), implied));
-    if (Math.abs(implied - computed) < 0.005) check = "ok";
-    else if (Math.abs(clamped - computed) >= 0.005) { balance = round2(clamped); check = "adjusted"; }
-    else check = "differs";
-  }
+  if (implied != null && isFinite(implied)) check = Math.abs(implied - computed) < 0.005 ? "ok" : "differs";
   const acc = {
     id: "plaid:" + a.account_id,
     name: [item.institutionName, a.official_name || a.name].filter(Boolean).join(" · "),
