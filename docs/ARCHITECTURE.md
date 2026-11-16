@@ -209,7 +209,9 @@ phones) and last sync ("Ultima sync"/"Sync", date only). The last sync is Plaid'
 `status.transactions.last_successful_update` from `/item/get` (or the time of the live balance read)
 for Plaid accounts, and the Wallet account's `updatedAt` for Wallet bank-synced accounts (Wallet has no
 "last sync" field; `updatedAt` moves on each sync round, so it is an approximation). A bank-synced
-account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—".
+account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—". A green dot before
+the sync date marks a Plaid balance read in real time (within the last 5 minutes); no dot means
+Plaid's cached balance.
 
 Per-account source tags in the table: **P** = Plaid (bank balance as of Plaid's latest refresh, pending included),
 **W** = Wallet bank sync, **M** = entered by hand (Wallet cash accounts or the local manual account).
