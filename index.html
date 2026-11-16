@@ -125,6 +125,10 @@ footer a{color:#8fb0ff}
 #wallet-wrap .stale{color:var(--warn)}
 #wallet-info{padding:6px 10px 0}
 #wallet-actions{padding:8px 10px 0}
+#wallet-wrap .pend{display:block;font-size:11px;color:var(--warn);font-weight:400}
+#plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
+#plaid-items .it{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#plaid-items .bad{color:var(--down)}
 #extra-form{padding:10px 10px 0}
 #extra-form input,#extra-form select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit}
 #extra-name{flex:1 1 100%;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
@@ -215,7 +219,8 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
-  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><span class="hint" id="wallet-refresh-msg"></span></div>
+  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><span class="hint" id="wallet-refresh-msg"></span></div>
+  <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
     <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
@@ -2681,8 +2686,16 @@ function renderWallet() {
     for (const a of accounts) {
       const tr = document.createElement('tr');
       const name = cell(a.name, 'l');
-      name.title = a.name + (a.local ? ' (manuale, solo in questo browser)' : a.bankSync ? '' : ' (inserito a mano in Wallet)');
-      tr.append(name, cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : '')));
+      name.title = a.name + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
+      const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
+      if (a.pending && a.pending.count) {
+        const p = document.createElement('span');
+        p.className = 'pend';
+        p.textContent = `in sospeso ${fmtMoney(a.pending.amount, a.currency)}`;
+        bal.title = `Contabilizzato ${fmtMoney(a.postedBalance, a.currency)}, ${a.pending.count} movimenti in sospeso`;
+        bal.append(p);
+      }
+      tr.append(name, bal);
       tr.append(creditCell(a.credit, a.currency));
       const last = cell(fmtDay(a.lastRecordDate), 'num last');
       if (a.bankSync && a.lastRecordDate && (today - Date.parse(a.lastRecordDate)) / 86400000 > WALLET_STALE_DAYS) {
@@ -2710,11 +2723,14 @@ function renderWallet() {
   const parts = [];
   if (d) {
     parts.push(`Dati di Wallet modificati il ${fmtWhen(Date.parse(d.dataChangedAt))}, scaricati il ${fmtWhen(wallet.fetchedAt)}.`);
-    parts.push('Saldi calcolati da Wallet sui movimenti registrati.');
+    parts.push(d.pendingIncluded
+      ? 'Conti collegati con Plaid: saldo della banca con i movimenti in sospeso inclusi; gli altri dai movimenti registrati in Wallet.'
+      : 'Saldi calcolati da Wallet sui movimenti registrati.');
     if (d.fx) parts.push(`Cambio EURUSD ${d.fx.rate.toFixed(4)} di Wallet al ${fmtDay(d.fx.asOf)}.`);
   }
   if (walletErr) parts.push(`Aggiornamento non riuscito: ${walletErr}.`);
   el('wallet-info').textContent = parts.join(' ');
+  renderPlaidItems(d && d.plaid);
   el('wallet-info').classList.toggle('down', !!walletErr && !d);
 }
 
@@ -2744,6 +2760,98 @@ async function refreshWallet(force) {
     clearTimeout(timer);
     walletBusy = false;
     renderWallet();
+  }
+}
+
+// ---------- Plaid Link: connect a bank, or re-authorise one (update mode) ----------
+const PLAID_SCRIPT = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+const PLAID_STATE = 'pt.plaidLink';   // link token kept across the bank's OAuth redirect
+const plaidMsg = (text, bad) => { const o = el('wallet-refresh-msg'); o.textContent = text; o.classList.toggle('down', !!bad); };
+
+function loadPlaid() {
+  if (window.Plaid) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const sc = document.createElement('script');
+    sc.src = PLAID_SCRIPT;
+    sc.onload = resolve;
+    sc.onerror = () => reject(new Error('non riesco a caricare Plaid Link'));
+    document.head.append(sc);
+  });
+}
+
+async function workerPost(path, body) {
+  let res;
+  try {
+    res = await fetch(conn.url + path, { method: 'POST', headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' });
+  } catch { throw new Error('Worker non raggiungibile'); }
+  const out = await res.json().catch(() => null);
+  if (!res.ok || !out || !out.ok) throw new Error((out && out.message) || 'HTTP ' + res.status);
+  return out;
+}
+
+function startLink(token, itemId, receivedRedirectUri) {
+  const handler = window.Plaid.create({
+    token,
+    receivedRedirectUri: receivedRedirectUri || undefined,
+    onSuccess: async (publicToken, meta) => {
+      try { localStorage.removeItem(PLAID_STATE); } catch { /* storage unavailable */ }
+      try {
+        // Update mode keeps the same access token: nothing to exchange.
+        if (!itemId) await workerPost('/plaid/exchange', { publicToken, institutionName: meta && meta.institution && meta.institution.name });
+        plaidMsg(itemId ? 'Banca ricollegata.' : `Collegata: ${(meta && meta.institution && meta.institution.name) || 'banca'}.`);
+        lastForced = 0;
+        await refreshWallet(true);
+      } catch (e) { plaidMsg('Collegamento non salvato: ' + e.message, true); }
+    },
+    onExit: (err) => {
+      try { localStorage.removeItem(PLAID_STATE); } catch { /* storage unavailable */ }
+      if (err) plaidMsg('Plaid: ' + (err.display_message || err.error_message || err.error_code), true);
+    },
+  });
+  handler.open();
+}
+
+async function openPlaid(itemId) {
+  if (!conn) return;
+  if (!itemId && !confirm('Ogni banca collegata usa 1 dei 10 collegamenti gratuiti di Plaid, anche se poi la scolleghi. Collega ogni banca una volta sola. Continuare?')) return;
+  plaidMsg('Apro Plaid…');
+  try {
+    const redirectUri = location.origin + location.pathname;
+    let r;
+    try { r = await workerPost('/plaid/link-token', { itemId, redirectUri }); } catch (e) {
+      // Redirect URI not registered in the Plaid dashboard: OAuth banks then use a popup instead.
+      if (!/redirect/i.test(e.message)) throw e;
+      r = await workerPost('/plaid/link-token', { itemId });
+    }
+    try { localStorage.setItem(PLAID_STATE, JSON.stringify({ linkToken: r.linkToken, itemId: itemId || null, at: Date.now() })); } catch { /* storage unavailable */ }
+    await loadPlaid();
+    plaidMsg('');
+    startLink(r.linkToken, itemId);
+  } catch (e) { plaidMsg('Plaid: ' + e.message, true); }
+}
+el('plaid-link').onclick = () => openPlaid(null);
+
+function renderPlaidItems(plaid) {
+  const box = el('plaid-items');
+  box.replaceChildren();
+  el('plaid-link').hidden = !(plaid && plaid.configured);
+  if (!plaid || !plaid.items || !plaid.items.length) return;
+  for (const it of plaid.items) {
+    const row = document.createElement('div');
+    row.className = 'it';
+    const label = document.createElement('span');
+    label.textContent = `${it.institution || 'Banca'} (Plaid): ` + (it.ok
+      ? `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}${it.pendingKnown ? '' : ', movimenti in sospeso non ancora disponibili'}`
+      : `errore ${it.error && it.error.code}, mostro i dati di Wallet`);
+    if (!it.ok) label.className = 'bad';
+    row.append(label);
+    if (!it.ok && it.error && /LOGIN|CONSENT|EXPIRED|PENDING_DISCONNECT|PENDING_EXPIRATION/.test(it.error.code || '')) {
+      const b = document.createElement('button');
+      b.className = 'btn sec'; b.type = 'button'; b.textContent = 'Riconnetti';
+      b.onclick = () => openPlaid(it.itemId);
+      row.append(b);
+    }
+    box.append(row);
   }
 }
 
@@ -2781,6 +2889,13 @@ document.addEventListener('visibilitychange', () => {
 });
 setInterval(() => { if (!document.hidden && app && conn && Date.now() - ((remote && remote.checkedAt) || 0) > 3 * RECHECK_MS) refresh(); }, RECHECK_MS);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && app) refreshWallet(); });
+// Back from a bank's OAuth page: resume Plaid Link with the token saved before leaving.
+if (/[?&]oauth_state_id=/.test(location.search) && conn) {
+  const back = location.href;
+  history.replaceState(null, '', location.pathname);
+  const st = read(PLAID_STATE);
+  if (st && st.linkToken && Date.now() - st.at < 30 * 60 * 1000) loadPlaid().then(() => startLink(st.linkToken, st.itemId, back)).catch((e) => plaidMsg('Plaid: ' + e.message, true));
+}
 setInterval(() => { if (!document.hidden && app) refreshWallet(); }, RECHECK_MS);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
