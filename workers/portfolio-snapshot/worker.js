@@ -368,6 +368,9 @@ function walletAccount(a, limits) {
     bankSync: !!a.isBankSync,
     balance: round2(raw),
     lastRecordDate: last ? last.slice(0, 10) : null,
+    // Wallet exposes no "last bank sync" field: the account document's last change is the closest
+    // proxy (it moves on each sync round). Only meaningful for bank-synced accounts.
+    lastSync: a.isBankSync && a.updatedAt ? a.updatedAt : null,
     credit: null,
   };
   if (a.accountType === "CreditCard") {
@@ -542,7 +545,7 @@ const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 /** Live balances (from the bank) and the pending transactions of one linked bank. */
 async function plaidItemData(env, item) {
   const today = Date.now();
-  const [bal, tx] = await Promise.allSettled([
+  const [bal, tx, itemInfo] = await Promise.allSettled([
     plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }),
     plaidCall(env, "/transactions/get", {
       access_token: item.accessToken,
@@ -550,8 +553,12 @@ async function plaidItemData(env, item) {
       end_date: isoDay(today + 86400000),
       options: { count: 500 },
     }),
+    plaidCall(env, "/item/get", { access_token: item.accessToken }),
   ]);
-  const status = { itemId: item.itemId, institution: item.institutionName, ok: bal.status === "fulfilled", error: null, pendingKnown: tx.status === "fulfilled", accounts: 0 };
+  // Last time Plaid refreshed this bank's transactions; the balance itself is read live just now.
+  const txStatus = itemInfo.status === "fulfilled" && itemInfo.value.status && itemInfo.value.status.transactions;
+  const lastSync = (txStatus && txStatus.last_successful_update) || new Date(today).toISOString();
+  const status = { itemId: item.itemId, institution: item.institutionName, ok: bal.status === "fulfilled", error: null, pendingKnown: tx.status === "fulfilled", accounts: 0, lastSync };
   if (bal.status !== "fulfilled") {
     status.error = { code: bal.reason.plaidCode || "plaid_error", message: bal.reason.plaidMessage || String(bal.reason.message) };
     return { status, accounts: [] };
@@ -576,7 +583,7 @@ async function plaidItemData(env, item) {
   }
   const accounts = (bal.value.accounts || [])
     .filter((a) => a.type !== "investment")
-    .map((a) => plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)));
+    .map((a) => ({ ...plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)), lastSync }));
   status.accounts = accounts.length;
   return { status, accounts };
 }

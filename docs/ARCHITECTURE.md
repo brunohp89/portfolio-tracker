@@ -203,6 +203,14 @@ stored in `PLAID_KV` under `names`, keyed by the account id in `/wallet`; an emp
 original, still shown in the tooltip). Names are applied last, so `CREDIT_LIMITS` and the Wallet/Plaid
 matching keep using the original names. The local manual account is renamed in the browser only.
 
+**Table layout:** accounts sorted alphabetically (Italian collation, case-insensitive). Columns:
+balance (with pending under it), credit used, last posted transaction ("Ultimo mov.", hidden on
+phones) and last sync ("Ultima sync"/"Sync", date only). The last sync is Plaid's
+`status.transactions.last_successful_update` from `/item/get` (or the time of the live balance read)
+for Plaid accounts, and the Wallet account's `updatedAt` for Wallet bank-synced accounts (Wallet has no
+"last sync" field; `updatedAt` moves on each sync round, so it is an approximation). A bank-synced
+account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—".
+
 Per-account source tags in the table: **P** = Plaid (live bank balance, pending included),
 **W** = Wallet bank sync, **M** = entered by hand (Wallet cash accounts or the local manual account).
 
