@@ -116,7 +116,12 @@ footer a{color:#8fb0ff}
 #wallet-wrap summary{cursor:pointer;padding:10px 6px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
 #wallet-wrap summary b{color:var(--text)}
 #wallet-wrap td.l{max-width:240px;overflow:hidden;text-overflow:ellipsis}
-#wallet-wrap tfoot td{border-bottom:0;font-weight:600}
+#wallet-wrap tfoot td{border-bottom:0}
+#wallet-wrap tfoot tr.sub td{background:var(--panel);color:var(--muted);font-weight:500}
+#wallet-wrap tfoot tr.sub td.num{color:var(--text)}
+#wallet-wrap tfoot tr.sub:first-child td{border-top:2px solid #3a4358}
+#wallet-wrap tfoot tr.grand td{background:#1d2b55;color:#fff;font-weight:600;border-top:1px solid #2b3d73}
+#wallet-wrap tfoot tr.grand td.num{font-size:14px}
 #wallet-wrap .stale{color:var(--warn)}
 #wallet-info{padding:6px 10px 0}
 #wallet-actions{padding:8px 10px 0}
@@ -2687,15 +2692,16 @@ function renderWallet() {
       body.append(tr);
     }
     const t = accountTotals(d);
-    const addFoot = (label, value, creditTd) => {
+    const addFoot = (label, value, creditTd, kind) => {
       const tr = document.createElement('tr');
+      tr.className = kind;
       tr.append(cell(label, 'l'), cell(value, 'num'), creditTd || cell('', 'num'), cell('', 'last'));
       foot.append(tr);
     };
-    for (const [cur, v] of Object.entries(t.byCurrency || {})) addFoot('Conti in ' + cur, fmtMoney(v, cur));
+    for (const [cur, v] of Object.entries(t.byCurrency || {})) addFoot('Conti in ' + cur, fmtMoney(v, cur), null, 'sub');
     if (t.usd != null) {
-      addFoot('Totale in USD', fmtMoney(t.usd, 'USD'), creditCell(d.credit, 'USD'));
-      addFoot('Totale in EUR', fmtMoney(t.eur, 'EUR'));
+      addFoot('Totale in USD', fmtMoney(t.usd, 'USD'), creditCell(d.credit, 'USD'), 'grand');
+      addFoot('Totale in EUR', fmtMoney(t.eur, 'EUR'), null, 'grand');
     }
     sum.innerHTML = '';
     sum.append('Conti ');
