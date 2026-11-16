@@ -8,15 +8,15 @@ PWA, the two Cloudflare Workers and the external data sources fit together. It l
 
 | Component | What it is | Where it runs | Code |
 |---|---|---|---|
-| **Portfolio Brief** | Daily analysis of the Broker account plus BTC and ETH wallets: valuation, P&L, XIRR/TWR, VaR, projections, PDF/XLSX | Claude scheduled task "Daily portfolio brief", every day at 00:00 America/New_York (fires a few minutes later) | Claude plugin `portfolio-brief` v0.9.1, skill `daily-brief`, Python engine in `skills/daily-brief/scripts/engine` |
-| **Brief artifact** | The published dashboard "Portfolio Brief" on claude.ai; also stores the ledger cache (`ledger_cache_v2.wasm`, xz JSON) | claude.ai | written by the brief |
+| **Portfolio Brief** | Daily analysis of the brokerage account plus BTC and ETH wallets: valuation, P&L, XIRR/TWR, VaR, projections, PDF/XLSX | Claude scheduled task "Daily portfolio brief", every day at 00:00 America/New_York (fires a few minutes later) | Claude plugin `portfolio-brief` v0.9.1, skill `daily-brief`, Python engine in `skills/daily-brief/scripts/engine` |
+| **Brief artifact** | The published Portfolio Brief dashboard on claude.ai; also stores the ledger cache (`ledger_cache_v2.wasm`, xz JSON) | claude.ai | written by the brief |
 | **Portfolio Tracker** | Live PWA: positions at real-time prices, charts, returns, bank accounts and net worth | GitHub Pages (static, holds no data) | this repo: `index.html`, `sw.js`, `manifest.json` |
 | **Portfolio Brief app** | Static page that shows the latest `portfolio_brief.html` | GitHub Pages, separate repository (not covered in detail here) | separate repo |
 | **Worker `portfolio-snapshot`** | Authenticated backend of both apps: Drive files, bank balances (Wallet + Plaid), Plaid linking | Cloudflare Workers (free plan) | `workers/portfolio-snapshot/worker.js` |
 | **Worker `yahoo-proxy`** | CORS proxy for Yahoo Finance `/v8/finance/chart` and `/v8/finance/spark` only | Cloudflare Workers | source embedded in `index.html` (`#worker-src`) |
 | **CLI `tools/wallet_balances.py`** | Command-line print of the Wallet balances (same logic as `/wallet`, Wallet only) | anywhere with Python 3 | `tools/wallet_balances.py` |
 
-External data sources: Broker CSV exports (Google Drive), Yahoo Finance, mempool.space (BTC
+External data sources: brokerage CSV exports (Google Drive), Yahoo Finance, mempool.space (BTC
 xpub), Blockscout (ETH address), Coinbase Exchange (WebSocket and candles), Finnhub (WebSocket
 trades), BudgetBakers Wallet REST API, Plaid.
 
@@ -25,14 +25,14 @@ trades), BudgetBakers Wallet REST API, Plaid.
 ```mermaid
 flowchart LR
   subgraph Sources["External sources"]
-    EXP["Broker CSV exports<br/>(Drive folder 'Broker')"]
+    EXP["Brokerage CSV exports<br/>(Drive exports folder)"]
     YF["Yahoo Finance"]
     CHAIN["mempool.space (BTC)<br/>Blockscout (ETH)"]
     CB["Coinbase Exchange<br/>WS + candles"]
     FH["Finnhub WS"]
     BB["BudgetBakers Wallet<br/>REST API"]
     PL["Plaid API"]
-    BANKS["Banks: Bank A, Bank B,<br/>Bank C, Bank D"]
+    BANKS["Banks<br/>(Bank A, B, C, D)"]
     WB["Wallet-only bank"]
   end
 
@@ -50,7 +50,7 @@ flowchart LR
 
   subgraph CF["Cloudflare"]
     WS["Worker portfolio-snapshot"]
-    KV[("KV portfolio-plaid<br/>Plaid access tokens")]
+    KV[("KV portfolio-plaid<br/>Plaid tokens, names, caches")]
     WY["Worker yahoo-proxy"]
   end
 
@@ -78,7 +78,7 @@ flowchart LR
   BB --> WB
 
   PWA -->|"/snapshot"| WS
-  PWA -->|"/wallet, /plaid/*"| WS
+  PWA -->|"/wallet, /plaid/*, /accounts/rename"| WS
   BAPP -->|"/brief"| WS
   PWA -->|"chart, spark"| WY --> YF
   PWA --> CB
@@ -89,7 +89,7 @@ flowchart LR
 ## 3. Portfolio Brief (daily, unattended)
 
 Trigger: scheduled task "Daily portfolio brief" (`CRON_TZ=America/New_York 0 0 * * *`), which invokes
-`portfolio-brief:daily-brief`. Messages are in Italian. The final reply also shows Broker and crypto
+`portfolio-brief:daily-brief`. Messages are in Italian. The final reply also shows the brokerage and crypto
 separately (value, day change, all-time P&L, MWR per year).
 
 ```mermaid
@@ -102,7 +102,7 @@ sequenceDiagram
   participant Y as Yahoo / mempool / Blockscout
   T->>S: run
   S->>A: read ledger_cache_v2.wasm
-  S->>D: list CSV exports (folder "Broker")
+  S->>D: list CSV exports (exports folder)
   S->>S: run.py (download exports only if NEED_EXPORTS)
   S->>Y: prices, BTC xpub and ETH balances
   S->>S: render.py (HTML, PDF, XLSX), drive_export.py, summary.py
@@ -119,14 +119,15 @@ sequenceDiagram
 
 Engine facts worth knowing (from the plugin README):
 
-- **Inputs:** Broker CSV exports, Yahoo Finance prices, on-chain balances for the BTC xpub and
+- **Inputs:** brokerage CSV exports, Yahoo Finance prices, on-chain balances for the BTC xpub and
   ETH address in `config.json`.
 - **Ledger:** merged export rows are cached in the artifact (cache version 5) and replayed on every
   run. Pending rows in an export count as confirmed and are dropped once a later export shows them
   completed.
-- **Linked Broker accounts:** journals to and from the other Broker accounts are treated as
-  CD purchases and redemptions (`CD position`, at cost), not as contributions or withdrawals.
-- **Return by deposit** (`deposits.py`): every deposit is its own lot; lots add up to the Broker
+- **Linked brokerage accounts:** journals to and from the owner's other accounts at the same broker
+  are treated as CD purchases and redemptions (a CD position at cost), not as contributions or
+  withdrawals.
+- **Return by deposit** (`deposits.py`): every deposit is its own lot; lots add up to the brokerage
   value and P&L, checked on every run.
 - **Splits:** a "DISTRIBUTION OF STOCK" row scales open lots; a split Yahoo reports before the
   export arrives is applied provisionally and flagged.
@@ -228,8 +229,9 @@ Balance rules:
   reuses that read for the next 5 minutes, and otherwise reads Plaid's cached balances with
   `/accounts/get` (15 per minute per Item). After a `BALANCE_LIMIT` answer it falls back to
   `/accounts/get` in the same request and suspends real-time reads for that Item for 1 hour. The state
-  (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes (credit: `-current`, depository: `current`) plus
-  the listed pending transactions, then the two guards below.
+  (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes.
+  Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
+  transactions, then the two guards below.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
@@ -287,6 +289,12 @@ sequenceDiagram
 If the redirect URI is not registered in the Plaid dashboard, the PWA retries without it and OAuth
 banks use a popup instead.
 
+"Cerca istituto" calls `GET /plaid/institutions?q=<name>`, a read-only lookup of Plaid's
+institution list with the products each institution supports; it links nothing and uses no Item.
+
+Linked as of 2026-11-16: 5 of the 10 Trial Items (four banks, one of them through two separate
+logins of the household). The Wallet-only bank stays on Wallet.
+
 ### 4.5 Local-only features
 
 - **Manual account** under the Conti table (name, amount, USD/EUR, a "±" button for debts): stored in
@@ -322,7 +330,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 | `PLAID_CLIENT_ID` | text | Plaid client id |
 | `PLAID_SECRET` | secret | Plaid Production secret |
 | `PLAID_ENV` | text, optional | `production` (default) or `sandbox` |
-| `PLAID_KV` | KV binding | namespace `portfolio-plaid`, one key `item:<item_id>` per linked bank |
+| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
 
 Elsewhere:
 
@@ -349,16 +357,31 @@ Elsewhere:
 
 - **Wallet:** about 300 requests/hour (shared by REST and MCP); no pending transactions; no API to
   trigger a bank sync; balances are computed by Wallet from imported records, so a missed or
-  duplicated import shifts them. Bank sync timing varies by bank (Bank C was observed lagging).
+  duplicated import shifts them. Bank sync timing varies by bank (one card issuer was observed lagging by a day).
 - **Plaid Trial plan:** 10 Items; removing an Item does not free its slot and linking the same bank
   twice uses two. Use "Riconnetti" (update mode) for expired logins. OAuth banks may need the PWA URL
   in "Allowed redirect URIs".
-- **the Wallet-only bank** is read through Wallet only (Plaid is set up for the linked banks; direct open banking access needs a
+- **The Wallet-only bank** is read through Wallet only (Plaid is set up for the linked banks; direct open banking access needs a
   licensed provider and is limited to 4 unattended reads a day).
-- **Alternatives evaluated:** Teller (no Bank C, developer sign-up not available), SimpleFIN
-  (coverage and pending support not verified), Enable Banking (the Wallet-only bank coverage not verified).
+- **Alternatives evaluated:** Teller (one of the banks not covered, developer sign-up not available),
+  SimpleFIN (coverage and pending support not verified), Enable Banking (coverage of the Wallet-only bank
+  not verified).
 - **Cloudflare free plan:** 100k Worker requests/day, KV 100k reads and 1k writes a day; far above
-  this use.
+  this use (about 300 KV writes a day: the two caches every 10 minutes).
+- **The brokerage via Plaid Investments** was tried on 2026-11-16 and reverted: Plaid lists the
+  broker with `investments`, but the login stops with "Action required with your account" and nothing
+  on the broker's site fixes it. The brief keeps using the CSV exports.
+
+### Open issues (not fixed yet)
+
+- **Joint accounts across Plaid logins:** a joint account visible from two logins (e.g. the two
+  logins at the same bank) is returned twice; only the first copy replaces its Wallet twin, the second is added as
+  a new row and counted twice. Fix: dedupe Plaid accounts by institution + last 4 digits + currency.
+- **Loans:** for Plaid `loan` accounts (mortgage, auto, student) `current` is the amount owed, but
+  `plaidAccount` treats every non-credit account as an asset, so a loan would raise the net worth.
+  Fix: treat `loan` like `credit` (negative balance).
+- **Last 4 digits matching:** a new Plaid account with the same last 4 digits and currency as an
+  unrelated Wallet account would replace it.
 
 ## 9. Operations
 
@@ -369,6 +392,6 @@ Elsewhere:
   the file into the Cloudflare dashboard editor. Keep the repo copy and the deployed copy identical.
 - **Deploying the PWA:** push to `main`; GitHub Pages rebuilds in about 40 s. Reopen the app (the
   service worker serves the new shell on the next network-first load).
-- **Linking banks:** one bank at a time, once each (Bank A, Bank B, Bank C, Bank D planned).
+- **Linking banks:** one bank at a time, once each; check coverage first with "Cerca istituto".
 - **Checking a Plaid bank after linking:** compare the balance and the "in sospeso" line with the bank
   app; a check mark means the bank's available figure confirms the pending amount.
