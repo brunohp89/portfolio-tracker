@@ -134,6 +134,9 @@ footer a{color:#8fb0ff}
 #plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
 #plaid-items .it{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 #plaid-items .bad{color:var(--down)}
+#plaid-compare{padding:6px 10px 0}
+#plaid-compare table{margin-top:6px}
+#plaid-compare td,#plaid-compare th{padding:4px 8px}
 #extra-form{padding:10px 10px 0}
 #extra-form input,#extra-form select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit}
 #extra-name{flex:1 1 100%;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
@@ -225,8 +228,9 @@ footer a{color:#8fb0ff}
     <tfoot id="wallet-foot"></tfoot>
   </table>
   <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo live dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span></div>
-  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
+  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-invest">Collega investimenti</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
+  <div class="hint" id="plaid-compare"></div>
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
     <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
@@ -2806,7 +2810,7 @@ async function workerPost(path, body) {
   return out;
 }
 
-function startLink(token, itemId, receivedRedirectUri) {
+function startLink(token, itemId, receivedRedirectUri, products) {
   const handler = window.Plaid.create({
     token,
     receivedRedirectUri: receivedRedirectUri || undefined,
@@ -2814,7 +2818,7 @@ function startLink(token, itemId, receivedRedirectUri) {
       try { localStorage.removeItem(PLAID_STATE); } catch { /* storage unavailable */ }
       try {
         // Update mode keeps the same access token: nothing to exchange.
-        if (!itemId) await workerPost('/plaid/exchange', { publicToken, institutionName: meta && meta.institution && meta.institution.name });
+        if (!itemId) await workerPost('/plaid/exchange', { publicToken, products, institutionName: meta && meta.institution && meta.institution.name });
         plaidMsg(itemId ? 'Banca ricollegata.' : `Collegata: ${(meta && meta.institution && meta.institution.name) || 'banca'}.`);
         lastForced = 0;
         await refreshWallet(true);
@@ -2828,25 +2832,94 @@ function startLink(token, itemId, receivedRedirectUri) {
   handler.open();
 }
 
-async function openPlaid(itemId) {
+async function openPlaid(itemId, products) {
   if (!conn) return;
-  if (!itemId && !confirm('Ogni banca collegata usa 1 dei 10 collegamenti gratuiti di Plaid, anche se poi la scolleghi. Collega ogni banca una volta sola. Continuare?')) return;
+  if (!itemId && !confirm(`Ogni ${products ? 'istituto' : 'banca'} collegato usa 1 dei 10 collegamenti gratuiti di Plaid, anche se poi lo scolleghi. Collegalo una volta sola. Continuare?`)) return;
   plaidMsg('Apro Plaid…');
   try {
     const redirectUri = location.origin + location.pathname;
     let r;
-    try { r = await workerPost('/plaid/link-token', { itemId, redirectUri }); } catch (e) {
+    try { r = await workerPost('/plaid/link-token', { itemId, redirectUri, products }); } catch (e) {
       // Redirect URI not registered in the Plaid dashboard: OAuth banks then use a popup instead.
       if (!/redirect/i.test(e.message)) throw e;
-      r = await workerPost('/plaid/link-token', { itemId });
+      r = await workerPost('/plaid/link-token', { itemId, products });
     }
-    try { localStorage.setItem(PLAID_STATE, JSON.stringify({ linkToken: r.linkToken, itemId: itemId || null, at: Date.now() })); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(PLAID_STATE, JSON.stringify({ linkToken: r.linkToken, itemId: itemId || null, products: products || null, at: Date.now() })); } catch { /* storage unavailable */ }
     await loadPlaid();
     plaidMsg('');
-    startLink(r.linkToken, itemId);
+    startLink(r.linkToken, itemId, null, products);
   } catch (e) { plaidMsg('Plaid: ' + e.message, true); }
 }
 el('plaid-link').onclick = () => openPlaid(null);
+el('plaid-invest').onclick = () => openPlaid(null, ['investments']);
+
+/**
+ * Compares the brokerage positions read through Plaid with the brief's snapshot: quantities per
+ * ticker, plus cash and CDs/other holdings without a ticker by value (prices and dates differ).
+ */
+async function compareHoldings() {
+  const box = el('plaid-compare');
+  box.textContent = 'Confronto in corso…';
+  try {
+    let res;
+    try { res = await fetch(conn.url + '/plaid/holdings', { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' }); }
+    catch { throw new Error('Worker non raggiungibile'); }
+    const out = await res.json().catch(() => null);
+    if (!res.ok || !out || !out.ok) throw new Error((out && out.message) || 'HTTP ' + res.status);
+    const items = out.items.filter((i) => i.ok);
+    if (!items.length) throw new Error(out.items.length ? 'Plaid: ' + out.items.map((i) => i.error && i.error.code).join(', ') : 'nessun istituto di investimento collegato');
+    const plaidQty = new Map(); let plaidCash = 0, plaidOther = 0; const others = [];
+    // Quantity of buys and sells in the last days per ticker (Plaid: buys positive, sells negative).
+    const recentQty = new Map(); let recentKnown = true;
+    for (const it of items) {
+      if (!it.recentTrades) { recentKnown = false; continue; }
+      for (const t of it.recentTrades) if (t.ticker && (t.type === 'buy' || t.type === 'sell') && t.quantity) recentQty.set(t.ticker, (recentQty.get(t.ticker) || 0) + t.quantity);
+    }
+    for (const it of items) for (const h of it.holdings) {
+      if (h.cash) plaidCash += h.value || 0;
+      else if (h.ticker) plaidQty.set(h.ticker, (plaidQty.get(h.ticker) || 0) + h.quantity);
+      else { plaidOther += h.value || 0; others.push(`${h.name || h.cusip || '?'} ${fmtMoney(h.value, 'USD')}`); }
+    }
+    const briefQty = new Map(); let briefCash = 0, briefOther = 0;
+    for (const p of (remote && remote.snap && remote.snap.positions) || []) {
+      if (p.kind === 'crypto') continue;
+      if (p.symbol === 'Sweep') briefCash += Number(p.value) || 0;
+      else if (p.kind === 'static') briefOther += Number(p.value) || 0;
+      else briefQty.set(p.symbol, (briefQty.get(p.symbol) || 0) + (Number(p.qty) || 0));
+    }
+    const q = (v) => v == null ? '—' : v.toLocaleString('en-US', { maximumFractionDigits: 4 });
+    const rows = [];
+    let same = 0, pending = 0;
+    for (const sym of [...new Set([...briefQty.keys(), ...plaidQty.keys()])].sort()) {
+      const a = briefQty.get(sym) ?? null, b = plaidQty.get(sym) ?? null;
+      if (a != null && b != null && Math.abs(a - b) < 1e-4) { same++; continue; }
+      // The brief counts pending trades as settled: a gap equal to a recent trade that Broker's
+      // positions do not show yet is not a real difference.
+      const r = recentQty.get(sym) || 0;
+      const explained = r !== 0 && Math.abs((b || 0) + r - (a || 0)) < 1e-4;
+      if (explained) pending++;
+      rows.push([sym, a, b, explained ? `operazione recente ${r > 0 ? '+' : ''}${q(r)}` : r ? `operazioni recenti ${r > 0 ? '+' : ''}${q(r)}` : '']);
+    }
+    const table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th class="l">Titolo</th><th>Brief</th><th>Broker</th><th>Differenza</th><th class="l">Nota</th></tr></thead>';
+    const tb = document.createElement('tbody');
+    for (const [sym, a, b, note] of rows) {
+      const tr = document.createElement('tr');
+      const ok = note.startsWith('operazione recente');
+      tr.append(cell(sym, 'l'), cell(q(a), 'num'), cell(q(b), 'num'), cell(q((b || 0) - (a || 0)), 'num' + (ok ? ' muted' : ' down')), cell(note, 'l' + (ok ? ' up' : ' muted')));
+      tb.append(tr);
+    }
+    table.append(tb);
+    const head = document.createElement('div');
+    head.textContent = `Confronto con lo snapshot del brief al ${remote && remote.snap ? remote.snap.asof : '?'}: ${same} titoli con la stessa quantità, ` +
+      `${pending} allineati contando come eseguite le operazioni recenti (come fa il brief con i pending), ${rows.length - pending} diversi o presenti da una parte sola. ` +
+      (recentKnown ? '' : 'Operazioni recenti non disponibili da Plaid. ') +
+      `Liquidità: brief ${fmtMoney(briefCash, 'USD')}, Broker ${fmtMoney(plaidCash, 'USD')}. CD e altro senza ticker: brief ${fmtMoney(briefOther, 'USD')}, Broker ${fmtMoney(plaidOther, 'USD')}` +
+      (others.length ? ` (${others.slice(0, 6).join('; ')}${others.length > 6 ? '…' : ''})` : '') + '.';
+    box.replaceChildren(head);
+    if (rows.length) box.append(table);
+  } catch (e) { box.textContent = 'Confronto non riuscito: ' + e.message; }
+}
 
 /** Read-only check of Plaid's institution list: links nothing and uses no Item. */
 el('plaid-search').onclick = async () => {
@@ -2871,16 +2944,26 @@ function renderPlaidItems(plaid) {
   box.replaceChildren();
   el('plaid-link').hidden = !(plaid && plaid.configured);
   el('plaid-search').hidden = !(plaid && plaid.configured);
+  el('plaid-invest').hidden = !(plaid && plaid.configured);
   if (!plaid || !plaid.items || !plaid.items.length) return;
   for (const it of plaid.items) {
     const row = document.createElement('div');
     row.className = 'it';
     const label = document.createElement('span');
-    label.textContent = `${it.institution || 'Banca'} (Plaid): ` + (it.ok
-      ? `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}${it.pendingKnown ? '' : ', movimenti in sospeso non ancora disponibili'}`
-      : `errore ${it.error && it.error.code}, mostro i dati di Wallet`);
+    const invest = it.kind === 'investments';
+    label.textContent = `${it.institution || 'Banca'} (Plaid${invest ? ', investimenti' : ''}): ` + (!it.ok
+      ? `errore ${it.error && it.error.code}` + (invest ? '' : ', mostro i dati di Wallet')
+      : invest
+        ? `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}, ${it.holdings} posizioni, valore ${fmtMoney(it.value, 'USD')} (non sommato ai conti: lo conta il portafoglio)`
+        : `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}${it.pendingKnown ? '' : ', movimenti in sospeso non ancora disponibili'}`);
     if (!it.ok) label.className = 'bad';
     row.append(label);
+    if (invest && it.ok) {
+      const c = document.createElement('button');
+      c.className = 'btn sec'; c.type = 'button'; c.textContent = 'Confronta con il brief';
+      c.onclick = compareHoldings;
+      row.append(c);
+    }
     if (!it.ok && it.error && /LOGIN|CONSENT|EXPIRED|PENDING_DISCONNECT|PENDING_EXPIRATION/.test(it.error.code || '')) {
       const b = document.createElement('button');
       b.className = 'btn sec'; b.type = 'button'; b.textContent = 'Riconnetti';
@@ -2930,7 +3013,7 @@ if (/[?&]oauth_state_id=/.test(location.search) && conn) {
   const back = location.href;
   history.replaceState(null, '', location.pathname);
   const st = read(PLAID_STATE);
-  if (st && st.linkToken && Date.now() - st.at < 30 * 60 * 1000) loadPlaid().then(() => startLink(st.linkToken, st.itemId, back)).catch((e) => plaidMsg('Plaid: ' + e.message, true));
+  if (st && st.linkToken && Date.now() - st.at < 30 * 60 * 1000) loadPlaid().then(() => startLink(st.linkToken, st.itemId, back, st.products || undefined)).catch((e) => plaidMsg('Plaid: ' + e.message, true));
 }
 setInterval(() => { if (!document.hidden && app) refreshWallet(); }, RECHECK_MS);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
