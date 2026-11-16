@@ -2729,7 +2729,7 @@ function renderWallet() {
       tr.append(creditCell(a.credit, a.currency));
       tr.append(cell(fmtDay(a.lastRecordDate), 'num last'));
       const sync = cell(fmtSyncDay(a.lastSync), 'num sync');
-      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? ' (ultimo aggiornamento di saldo e movimenti da parte di Plaid)' : ' (ultima modifica registrata da Wallet)');
+      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? (a.balanceLive ? ' (saldo letto in tempo reale dalla banca)' : ' (saldo e movimenti dall\'ultimo aggiornamento di Plaid)') : ' (ultima modifica registrata da Wallet)');
       tr.append(sync);
       body.append(tr);
     }

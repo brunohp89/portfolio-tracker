@@ -545,12 +545,31 @@ async function plaidExchange(env, input) {
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 /** Live balances (from the bank) and the pending transactions of one linked bank. */
-async function plaidItemData(env, item) {
+async function plaidItemData(env, item, prev, prevAccounts) {
   const today = Date.now();
-  const [bal, tx, itemInfo] = await Promise.allSettled([
-    // /accounts/get, not /accounts/balance/get: the live-balance endpoint is billed and rate limited
-    // per call (BALANCE_LIMIT hit on 2026-11-16); these balances are Plaid's latest refresh.
-    plaidCall(env, "/accounts/get", { access_token: item.accessToken }),
+  // A real-time read less than PLAID_LIVE_MIN_MS old is fresher than Plaid's cache: reuse it as is.
+  if (prev && prev.ok && prev.balanceLive && today - (prev.liveAt || 0) < PLAID_LIVE_MIN_MS && prevAccounts && prevAccounts.length) {
+    return { status: prev, accounts: prevAccounts };
+  }
+  // Real-time balance (/accounts/balance/get) is rate limited to 5/min and 30/hour per Item in
+  // Production (BALANCE_LIMIT). Use it at most once per PLAID_LIVE_MIN_MS per Item, never while a
+  // BALANCE_LIMIT block is on, and fall back to /accounts/get (Plaid's cached balances) otherwise.
+  const blockedUntil = (prev && prev.liveBlockedUntil) || 0;
+  const lastLive = (prev && prev.liveAt) || 0;
+  const tryLive = today >= blockedUntil && today - lastLive >= PLAID_LIVE_MIN_MS;
+  let liveError = null;
+  const balanceRead = (async () => {
+    if (tryLive) {
+      try {
+        return { data: await plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }), live: true };
+      } catch (err) {
+        liveError = err;
+      }
+    }
+    return { data: await plaidCall(env, "/accounts/get", { access_token: item.accessToken }), live: false };
+  })();
+  const [balRead, tx, itemInfo] = await Promise.allSettled([
+    balanceRead,
     plaidCall(env, "/transactions/get", {
       access_token: item.accessToken,
       start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
@@ -561,8 +580,21 @@ async function plaidItemData(env, item) {
   ]);
   // Last time Plaid refreshed this bank's data (balances from /accounts/get come from the same refresh).
   const txStatus = itemInfo.status === "fulfilled" && itemInfo.value.status && itemInfo.value.status.transactions;
-  const lastSync = (txStatus && txStatus.last_successful_update) || new Date(today).toISOString();
-  const status = { itemId: item.itemId, institution: item.institutionName, ok: bal.status === "fulfilled", error: null, pendingKnown: tx.status === "fulfilled", accounts: 0, lastSync };
+  const live = balRead.status === "fulfilled" && balRead.value.live;
+  const bal = balRead.status === "fulfilled" ? { status: "fulfilled", value: balRead.value.data } : balRead;
+  const lastSync = live ? new Date(today).toISOString() : (txStatus && txStatus.last_successful_update) || new Date(today).toISOString();
+  const status = {
+    itemId: item.itemId,
+    institution: item.institutionName,
+    ok: bal.status === "fulfilled",
+    error: null,
+    pendingKnown: tx.status === "fulfilled",
+    accounts: 0,
+    lastSync,
+    balanceLive: live,
+    liveAt: live ? today : lastLive,
+    liveBlockedUntil: liveError && liveError.plaidCode === "BALANCE_LIMIT" ? today + PLAID_LIVE_BLOCK_MS : blockedUntil,
+  };
   if (bal.status !== "fulfilled") {
     status.error = { code: bal.reason.plaidCode || "plaid_error", message: bal.reason.plaidMessage || String(bal.reason.message) };
     return { status, accounts: [] };
@@ -587,7 +619,7 @@ async function plaidItemData(env, item) {
   }
   const accounts = (bal.value.accounts || [])
     .filter((a) => a.type !== "investment")
-    .map((a) => ({ ...plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)), lastSync }));
+    .map((a) => ({ ...plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)), lastSync, balanceLive: live, itemId: item.itemId }));
   status.accounts = accounts.length;
   return { status, accounts };
 }
@@ -644,6 +676,10 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
 }
 
 const PLAID_CACHE_KEY = "plaid:summary";
+/** At most one real-time balance read per Item in this window (Plaid allows 30 per hour). */
+const PLAID_LIVE_MIN_MS = 5 * 60 * 1000;
+/** After a BALANCE_LIMIT answer, no real-time read for that Item during this window. */
+const PLAID_LIVE_BLOCK_MS = 60 * 60 * 1000;
 /** Plaid answers shared by every Worker isolate (memory first, then KV), so Plaid is called at most
  * once per WALLET_TTL_MS (WALLET_FORCE_MIN_MS when forced) whatever the number of devices. */
 let plaidCache = { at: 0, items: null, accounts: null };
@@ -653,7 +689,11 @@ async function plaidFresh(env, force) {
   if (plaidCache.items && Date.now() - plaidCache.at < maxAge) return plaidCache;
   const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
   if (shared && shared.items && Date.now() - shared.at < maxAge) return (plaidCache = shared);
-  const results = await Promise.all((await plaidItems(env)).map((item) => plaidItemData(env, item)));
+  // The previous answer carries, per Item, the last real-time read and any BALANCE_LIMIT block.
+  const prev = [plaidCache, shared].filter((c) => c && c.items).sort((a, b) => b.at - a.at)[0];
+  const prevById = new Map(((prev && prev.items) || []).map((s) => [s.itemId, s]));
+  const prevAccounts = (id) => ((prev && prev.accounts) || []).filter((a) => a.itemId === id);
+  const results = await Promise.all((await plaidItems(env)).map((item) => plaidItemData(env, item, prevById.get(item.itemId), prevAccounts(item.itemId))));
   plaidCache = { at: Date.now(), items: results.map((r) => r.status), accounts: results.flatMap((r) => r.accounts) };
   await env.PLAID_KV.put(PLAID_CACHE_KEY, JSON.stringify(plaidCache)).catch(() => {});
   return plaidCache;

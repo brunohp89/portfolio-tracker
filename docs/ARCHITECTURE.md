@@ -186,7 +186,7 @@ sequenceDiagram
       W->>W: EURUSD from Yahoo Finance (fallback: Wallet's rate on the latest EUR record)
     and Plaid, per linked bank
       W->>K: list item:* (access tokens)
-      W->>L: /accounts/get (balances from Plaid's latest refresh), /item/get (last refresh time)
+      W->>L: /accounts/balance/get (live, max 1 per 5 min per bank) or /accounts/get (cached), /item/get
       W->>L: /transactions/get (last 14 days, pending flags)
     end
     W->>W: drop Investment accounts, map Wallet accounts
@@ -219,9 +219,13 @@ Balance rules:
 - **Wallet accounts:** Wallet's computed balance (`initial + incomes - expenses` over posted records,
   `rawCurrentBalance`, signed). Wallet's API exposes no pending transactions. Credit cards: owed =
   max(0, -balance).
-- **Plaid accounts:** posted balance from the bank as of Plaid's latest refresh (`/accounts/get`;
-  the live `/accounts/balance/get` was dropped on 2026-11-16 after `BALANCE_LIMIT` errors: it is billed
-  and rate limited per call) (credit: `-current`, depository: `current`) plus
+- **Plaid accounts:** posted balance from the bank. Real-time `/accounts/balance/get` is rate limited
+  in Production to 5 per minute and 30 per hour per Item (`BALANCE_LIMIT`, hit on 2026-11-16 when every
+  refresh of every isolate called it). The Worker now calls it at most once every 5 minutes per Item,
+  reuses that read for the next 5 minutes, and otherwise reads Plaid's cached balances with
+  `/accounts/get` (15 per minute per Item). After a `BALANCE_LIMIT` answer it falls back to
+  `/accounts/get` in the same request and suspends real-time reads for that Item for 1 hour. The state
+  (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes (credit: `-current`, depository: `current`) plus
   the listed pending transactions, then the two guards below.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
@@ -296,7 +300,7 @@ banks use a popup instead.
 | Stock and ETF prices | real time trades (Finnhub) + Yahoo poll every 30 s with the market open |
 | Bank balances in the PWA | on open, on foreground, every 10 min; "Aggiorna ora" forces it (max once a minute) |
 | Worker `/wallet` cache | 10 min (1 min floor for forced reads), per Worker isolate |
-| Plaid balances | Plaid's own refresh of each bank (several times a day), read through `/accounts/get`; Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min (1 min when forced) |
+| Plaid balances | real time at most every 5 min per bank (`/accounts/balance/get`), otherwise Plaid's latest refresh (`/accounts/get`); Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min (1 min when forced) |
 | Plaid pending list | Plaid's own transaction updates, typically a few times a day |
 | Wallet (the Wallet-only bank and any bank not on Plaid) | whenever Wallet syncs the bank; opening the Wallet app forces it; posted transactions only |
 
