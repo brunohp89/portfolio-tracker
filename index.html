@@ -2699,11 +2699,18 @@ function renderWallet() {
       name.append(tag, a.name);
       name.title = a.name + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
       const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
-      if (a.pending && a.pending.count) {
+      if (a.pending && (a.pending.count || a.pending.check === 'adjusted')) {
+        const pd = a.pending;
         const p = document.createElement('span');
         p.className = 'pend';
-        p.textContent = `in sospeso ${fmtMoney(a.pending.amount, a.currency)}`;
-        bal.title = `Contabilizzato ${fmtMoney(a.postedBalance, a.currency)}, ${a.pending.count} movimenti in sospeso`;
+        p.textContent = `in sospeso ${fmtMoney(pd.amount, a.currency)}` + (pd.check === 'ok' ? ' ✓' : pd.check === 'adjusted' ? ' (corretto)' : '');
+        const why = {
+          ok: 'Verificati con il saldo disponibile della banca.',
+          adjusted: `Una parte era già nel saldo della banca: tolta per non contarla due volte (elenco Plaid ${fmtMoney(pd.listed, a.currency)}, banca ${fmtMoney(pd.bankImplied, a.currency)}).`,
+          differs: `Il saldo disponibile della banca è ${fmtMoney(pd.bankImplied, a.currency)}: possono esserci pending non ancora nell'elenco di Plaid o somme bloccate.`,
+          unverified: 'La banca non fornisce il saldo disponibile: pending non verificabili.',
+        }[pd.check] || '';
+        bal.title = `Contabilizzato ${fmtMoney(a.postedBalance, a.currency)}, ${pd.count} movimenti in sospeso. ${why}`;
         bal.append(p);
       }
       tr.append(name, bal);
