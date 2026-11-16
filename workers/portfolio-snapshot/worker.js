@@ -583,6 +583,9 @@ async function plaidTxRefresh(env, item, prev, today) {
     await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS);
     return { at: today, blockedUntil: 0, error: null, requested: true };
   } catch (err) {
+    // Plaid answers /transactions/refresh only once the bank has answered, which can take longer than
+    // we wait. The request was sent and Plaid keeps working on it: count it as asked, not as an error.
+    if (err.plaidCode === "TIMEOUT") return { at: today, blockedUntil: 0, error: null, requested: true, unconfirmed: true };
     const error = { code: err.plaidCode || "plaid_error", message: err.plaidMessage || String(err.message) };
     // Not enabled for this Plaid account (e.g. a plan without the add-on): stop asking for a day.
     const notEnabled = /PRODUCT|NOT_AUTHORIZED|NOT_ENABLED|NOT_ALLOWED/.test(error.code) || /not (authorized|enabled)|add-on/i.test(error.message);
@@ -661,6 +664,7 @@ async function plaidItemData(env, item, prev, force) {
     txUpdatedAt,
     txRefreshAt: rf.at,
     txRefreshRequested: !!rf.requested,
+    txRefreshUnconfirmed: !!rf.unconfirmed,
     txRefreshBlockedUntil: rf.blockedUntil,
     txRefreshError: rf.error,
     balanceLive: live,
