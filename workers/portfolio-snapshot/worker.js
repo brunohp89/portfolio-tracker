@@ -33,6 +33,8 @@
  *   POST /plaid/link-token   {itemId?, redirectUri?} -> {linkToken} to open Plaid Link
  *                            (itemId = update mode, to re-authorise a linked bank)
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
+ *   GET  /plaid/institutions?q=<name>  read-only search of Plaid's institution list, with the
+ *                            products each one supports; links nothing and uses no Item
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
  * nothing changed, without downloading the file from Drive.
  */
@@ -73,10 +75,14 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (path !== "/check" && path !== "/wallet" && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (path !== "/check" && path !== "/wallet" && path !== "/plaid/institutions" && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
       if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1"), 200, cors);
+      if (path === "/plaid/institutions") {
+        if (!plaidConfigured(env)) throw new HttpError(500, "plaid_not_configured", "set PLAID_CLIENT_ID, PLAID_SECRET and the PLAID_KV binding");
+        return json(await plaidInstitutions(env, url.searchParams.get("q")), 200, cors);
+      }
       const describe = (file) => ({ id: file.id, name: file.name, modifiedTime: file.modifiedTime, size: Number(file.size) || null });
       if (path === "/check") {
         const found = {};
@@ -593,4 +599,26 @@ function mergeAccounts(walletAccounts, plaidAccounts) {
     merged.push(acc);
   }
   return merged;
+}
+
+/** Read-only lookup in Plaid's institution list: which institutions match and what they support. */
+async function plaidInstitutions(env, query) {
+  const q = String(query || "").trim().slice(0, 80);
+  if (q.length < 2) throw new HttpError(400, "bad_request", "q must have at least 2 characters");
+  const data = await plaidCall(env, "/institutions/search", {
+    query: q,
+    country_codes: PLAID_COUNTRY_CODES,
+    products: null,
+    options: { include_optional_metadata: false },
+  });
+  return {
+    ok: true,
+    query: q,
+    institutions: (data.institutions || []).slice(0, 10).map((i) => ({
+      id: i.institution_id,
+      name: i.name,
+      products: i.products || [],
+      oauth: !!i.oauth,
+    })),
+  };
 }
