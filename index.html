@@ -119,6 +119,7 @@ footer a{color:#8fb0ff}
 #wallet-wrap tfoot td{border-bottom:0;font-weight:600}
 #wallet-wrap .stale{color:var(--warn)}
 #wallet-info{padding:6px 10px 0}
+#wallet-actions{padding:8px 10px 0}
 #extra-form{padding:10px 10px 0}
 #extra-form input,#extra-form select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit}
 #extra-name{flex:1 1 160px;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
@@ -208,6 +209,7 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
+  <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
     <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
@@ -2702,17 +2704,20 @@ function renderWallet() {
   el('wallet-info').classList.toggle('down', !!walletErr && !d);
 }
 
-/** Downloads the balances from the Worker; the Worker caches Wallet's answer for 10 minutes. */
-async function refreshWallet() {
+/**
+ * Downloads the balances from the Worker; the Worker caches Wallet's answer for 10 minutes.
+ * force skips both caches (the Worker still allows at most one forced read a minute).
+ */
+async function refreshWallet(force) {
   if (!conn || walletBusy) return;
-  if (wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); return; }
+  if (!force && wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); return; }
   walletBusy = true;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 25000);
   try {
     let res;
     try {
-      res = await fetch(conn.url + '/wallet', { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store', signal: ctrl.signal });
+      res = await fetch(conn.url + '/wallet' + (force ? '?fresh=1' : ''), { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store', signal: ctrl.signal });
     } catch { throw { code: navigator.onLine === false ? 'offline' : 'network', message: 'Worker non raggiungibile' }; }
     const body = await res.json().catch(() => null);
     if (!res.ok || !body || !body.ok) throw { code: (body && body.error) || 'http', message: (body && body.message) || 'HTTP ' + res.status };
@@ -2727,6 +2732,23 @@ async function refreshWallet() {
     renderWallet();
   }
 }
+
+const FORCE_COOLDOWN_MS = 60 * 1000;
+let lastForced = 0;
+el('wallet-refresh').onclick = async () => {
+  const btn = el('wallet-refresh'), out = el('wallet-refresh-msg');
+  const wait = Math.ceil((lastForced + FORCE_COOLDOWN_MS - Date.now()) / 1000);
+  if (wait > 0) { out.textContent = `Riprova tra ${wait} s (limite di richieste di Wallet).`; return; }
+  lastForced = Date.now();
+  const before = wallet && wallet.data && wallet.data.dataChangedAt;
+  btn.disabled = true; btn.textContent = 'Aggiorno…'; out.textContent = '';
+  await refreshWallet(true);
+  btn.disabled = false; btn.textContent = 'Aggiorna ora';
+  const after = wallet && wallet.data && wallet.data.dataChangedAt;
+  out.textContent = walletErr ? '' : after && after !== before
+    ? 'Saldi aggiornati.'
+    : 'Nessuna novità da Wallet: apri l\'app Wallet per far sincronizzare le banche, poi riprova.';
+};
 
 // ---------- boot ----------
 if (remote && !validSnap(remote.snap)) remote = null;
