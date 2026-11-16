@@ -214,6 +214,12 @@ Balance rules:
   if Yahoo does not answer, the rate Wallet applied to the latest EUR record (shown as such).
 - **If a Plaid bank fails**, its accounts fall back to the Wallet data and the bank is listed with its
   Plaid error code; login errors show a "Riconnetti" button (Plaid update mode, uses no new Item).
+- **If Wallet fails** (error, timeout or rate limit) and Plaid is configured, `/wallet` still answers:
+  Plaid accounts are fresh, and Wallet-only accounts (the Wallet-only bank, cash) come from the last successful Wallet
+  read, kept in memory and in `PLAID_KV` under `wallet:last` (or are missing if there is none). The
+  answer carries `wallet: {ok, error, staleSince}` and the tracker shows the warning under the table.
+  Wallet uses its own aggregators (its terms name Salt Edge and Yodlee, not Plaid), so the two bank
+  feeds do not share an aggregator.
 
 Pending guards (Worker, per Plaid account):
 

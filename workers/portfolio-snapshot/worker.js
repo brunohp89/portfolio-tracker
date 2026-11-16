@@ -377,28 +377,59 @@ function walletAccount(a, limits) {
   return out;
 }
 
+const WALLET_LAST_KEY = "wallet:last";
+
+/**
+ * Last successful Wallet read, so a Wallet outage does not hide the Plaid balances: memory first,
+ * then PLAID_KV (survives new isolates). Written at most once per WALLET_TTL_MS.
+ */
+let walletLast = { at: 0, accounts: null };
+async function saveWalletLast(env, accounts) {
+  walletLast = { at: Date.now(), accounts };
+  if (env.PLAID_KV) await env.PLAID_KV.put(WALLET_LAST_KEY, JSON.stringify(walletLast)).catch(() => {});
+}
+async function loadWalletLast(env) {
+  if (walletLast.accounts || !env.PLAID_KV) return walletLast;
+  const saved = await env.PLAID_KV.get(WALLET_LAST_KEY, "json").catch(() => null);
+  if (saved && Array.isArray(saved.accounts)) walletLast = saved;
+  return walletLast;
+}
+
 async function walletSummary(env, force) {
   if (!env.WALLET_API_TOKEN) throw new HttpError(500, "wallet_not_configured", "set the WALLET_API_TOKEN secret");
   const age = Date.now() - walletCache.at;
   if (walletCache.body && age < (force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS)) return walletCache.body;
-  if (Date.now() < walletBackoffUntil) {
-    // Never call Wallet again while it asked us to wait: serve the last answer if there is one.
-    if (walletCache.body) return walletCache.body;
-    throw new HttpError(503, "wallet_rate_limited", `Wallet rate limit reached, retry after ${Math.ceil((walletBackoffUntil - Date.now()) / 1000)} s`);
-  }
+  const plaidOn = plaidConfigured(env);
 
-  let all, headers;
-  try {
-    ({ accounts: all, headers } = await walletAccounts(env));
-  } catch (err) {
-    // Rate limited: keep showing the last balances rather than an error.
-    if (err instanceof HttpError && err.code === "wallet_rate_limited" && walletCache.body) return walletCache.body;
-    throw err;
+  let all = null;
+  let headers = null;
+  let walletError = null;
+  if (Date.now() < walletBackoffUntil) {
+    // Never call Wallet again while it asked us to wait.
+    walletError = { code: "wallet_rate_limited", message: `retry after ${Math.ceil((walletBackoffUntil - Date.now()) / 1000)} s` };
+  } else {
+    try {
+      ({ accounts: all, headers } = await walletAccounts(env));
+      await saveWalletLast(env, all);
+    } catch (err) {
+      walletError = { code: (err instanceof HttpError && err.code) || "wallet_error", message: String((err && err.message) || err) };
+    }
+  }
+  let walletStale = null;
+  if (walletError) {
+    // Without Plaid there is nothing fresh to show: keep the old behaviour (last answer, else error).
+    if (!plaidOn) {
+      if (walletCache.body) return walletCache.body;
+      throw new HttpError(walletError.code === "wallet_rate_limited" ? 503 : 502, walletError.code, walletError.message);
+    }
+    const last = await loadWalletLast(env);
+    all = last.accounts || [];
+    walletStale = last.accounts ? new Date(last.at).toISOString() : null;
   }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
   const limits = creditLimitOverrides(env);
   const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits)]);
-  const fx = yfx || (await walletEurUsd(env, kept));
+  const fx = yfx || (walletError ? null : await walletEurUsd(env, kept));
   const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
 
   const byCurrency = {};
@@ -420,6 +451,8 @@ async function walletSummary(env, force) {
     pendingIncluded: accounts.some((a) => a.pending && a.pending.known),
     fx,
     plaid: { configured: plaid.configured, items: plaid.items, pendingDays: PLAID_PENDING_DAYS },
+    // Wallet outage: Plaid accounts are fresh, Wallet-only accounts come from staleSince (or are missing).
+    wallet: { ok: !walletError, error: walletError, staleSince: walletStale, accounts: kept.length },
     accounts,
     totals: { byCurrency, ...(total || {}) },
     credit: limit ? { owed: round2(owed), limit: round2(limit), utilizationPct: Math.round((1000 * owed) / limit) / 10 } : null,
