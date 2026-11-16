@@ -22,7 +22,8 @@
  *   GET /brief       newest file named BRIEF_NAME in the folder, as HTML
  *   GET /check       metadata of both files (for setting things up)
  *   GET /wallet      balance of every BudgetBakers Wallet account (investments excluded),
- *                    credit card utilization and totals; cached in memory for WALLET_TTL_MS
+ *                    credit card utilization and totals; cached in memory for WALLET_TTL_MS.
+ *                    ?fresh=1 skips the cache if it is older than WALLET_FORCE_MIN_MS.
  * /snapshot and /brief send an ETag; a request carrying it in If-None-Match gets 304 when
  * nothing changed, without downloading the file from Drive.
  */
@@ -54,12 +55,13 @@ export default {
     try {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
-      const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
+      const url = new URL(request.url);
+      const path = url.pathname.replace(/\/+$/, "") || "/";
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
       if (path !== "/check" && path !== "/wallet" && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
-      if (path === "/wallet") return json(await walletSummary(env), 200, cors);
+      if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1"), 200, cors);
       const describe = (file) => ({ id: file.id, name: file.name, modifiedTime: file.modifiedTime, size: Number(file.size) || null });
       if (path === "/check") {
         const found = {};
@@ -231,6 +233,8 @@ async function downloadFile(env, id) {
 const WALLET_API = "https://rest.budgetbakers.com/wallet/v1/api";
 const WALLET_PAGE = 200;
 const WALLET_TTL_MS = 10 * 60 * 1000;
+/** Shortest gap between two forced refreshes, to stay well inside Wallet's 300 requests/hour. */
+const WALLET_FORCE_MIN_MS = 60 * 1000;
 /** Valued by the portfolio tracker from market prices, not from Wallet. */
 const WALLET_EXCLUDED_TYPES = new Set(["Investment"]);
 /** Credit limits by Wallet account name from the CREDIT_LIMITS secret (kept out of this public code). */
@@ -246,6 +250,8 @@ function creditLimitOverrides(env) {
 
 /** Last summary, reused across requests served by the same isolate. */
 let walletCache = { at: 0, body: null };
+/** After a 429, Wallet is not called again before this time (its Retry-After). */
+let walletBackoffUntil = 0;
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
@@ -253,7 +259,11 @@ async function walletFetch(env, path, params) {
   const url = `${WALLET_API}/${path}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${env.WALLET_API_TOKEN}`, Accept: "application/json" } });
   if (res.status === 409) throw new HttpError(503, "wallet_initial_sync", "Wallet is still running its first sync, retry in a few minutes");
-  if (res.status === 429) throw new HttpError(503, "wallet_rate_limited", `Wallet rate limit reached, retry after ${res.headers.get("Retry-After") || "?"} s`);
+  if (res.status === 429) {
+    const retryS = Math.max(60, Number(res.headers.get("Retry-After")) || 0);
+    walletBackoffUntil = Date.now() + retryS * 1000;
+    throw new HttpError(503, "wallet_rate_limited", `Wallet rate limit reached, retry after ${retryS} s`);
+  }
   if (res.status === 401 || res.status === 403) throw new HttpError(502, "wallet_unauthorized", "Wallet refused WALLET_API_TOKEN");
   if (!res.ok) throw new HttpError(502, "wallet_error", `Wallet answered ${res.status}`);
   return { data: await res.json(), headers: res.headers };
@@ -319,11 +329,24 @@ function walletAccount(a, limits) {
   return out;
 }
 
-async function walletSummary(env) {
+async function walletSummary(env, force) {
   if (!env.WALLET_API_TOKEN) throw new HttpError(500, "wallet_not_configured", "set the WALLET_API_TOKEN secret");
-  if (walletCache.body && Date.now() - walletCache.at < WALLET_TTL_MS) return walletCache.body;
+  const age = Date.now() - walletCache.at;
+  if (walletCache.body && age < (force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS)) return walletCache.body;
+  if (Date.now() < walletBackoffUntil) {
+    // Never call Wallet again while it asked us to wait: serve the last answer if there is one.
+    if (walletCache.body) return walletCache.body;
+    throw new HttpError(503, "wallet_rate_limited", `Wallet rate limit reached, retry after ${Math.ceil((walletBackoffUntil - Date.now()) / 1000)} s`);
+  }
 
-  const { accounts: all, headers } = await walletAccounts(env);
+  let all, headers;
+  try {
+    ({ accounts: all, headers } = await walletAccounts(env));
+  } catch (err) {
+    // Rate limited: keep showing the last balances rather than an error.
+    if (err instanceof HttpError && err.code === "wallet_rate_limited" && walletCache.body) return walletCache.body;
+    throw err;
+  }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
   const limits = creditLimitOverrides(env);
   const accounts = kept.map((a) => walletAccount(a, limits));
