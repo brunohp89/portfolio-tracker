@@ -32,8 +32,8 @@ flowchart LR
     FH["Finnhub WS"]
     BB["BudgetBakers Wallet<br/>REST API"]
     PL["Plaid API"]
-    BANKS["Banks<br/>(Bank A, B, C, D)"]
-    WB["Wallet-only bank"]
+    BANKS["Banks A, B, C, D"]
+    WB["Bank read via Wallet only"]
   end
 
   subgraph Claude["Claude (claude.ai)"]
@@ -78,7 +78,7 @@ flowchart LR
   BB --> WB
 
   PWA -->|"/snapshot"| WS
-  PWA -->|"/wallet, /plaid/*, /accounts/rename"| WS
+  PWA -->|"/wallet, /labels, /plaid/*, /accounts/rename"| WS
   BAPP -->|"/brief"| WS
   PWA -->|"chart, spark"| WY --> YF
   PWA --> CB
@@ -200,6 +200,14 @@ sequenceDiagram
   P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
 ```
 
+**Private labels:** the public code holds placeholders only. `index.html` uses `BROKER` (display
+name of the brokerage and the `account` value of its positions in the snapshot) and `BK` (the
+snapshot's field name for its series and flows: `history[BK]`, `history['flow_' + BK]`,
+`flows[BK]`); the broker view's internal key is `broker`. The real values come from `GET /labels`
+(KV key `labels`, e.g. `{"broker": "...", "brokerKey": "..."}`), are kept in `localStorage`
+(`pt.labels`) and refreshed in the background; the first start without them waits for the Worker.
+Without labels the app shows "Broker" and the broker view stays empty.
+
 **Custom names:** the ✎ next to each account renames it for every device (`POST /accounts/rename`,
 stored in `PLAID_KV` under `names`, keyed by the account id in `/wallet`; an empty name restores the
 original, still shown in the tooltip). Names are applied last, so `CREDIT_LIMITS` and the Wallet/Plaid
@@ -239,7 +247,7 @@ Balance rules:
 - **If a Plaid bank fails**, its accounts fall back to the Wallet data and the bank is listed with its
   Plaid error code; login errors show a "Riconnetti" button (Plaid update mode, uses no new Item).
 - **If Wallet fails** (error, timeout or rate limit) and Plaid is configured, `/wallet` still answers:
-  Plaid accounts are fresh, and Wallet-only accounts (the Wallet-only bank, cash) come from the last successful Wallet
+  Plaid accounts are fresh, and Wallet-only accounts (the bank read only through Wallet, cash) come from the last successful Wallet
   read, kept in memory and in `PLAID_KV` under `wallet:last` (or are missing if there is none). The
   answer carries `wallet: {ok, error, staleSince}` and the tracker shows the warning under the table.
   Wallet uses its own aggregators (its terms name Salt Edge and Yodlee, not Plaid), so the two bank
@@ -292,8 +300,8 @@ banks use a popup instead.
 "Cerca istituto" calls `GET /plaid/institutions?q=<name>`, a read-only lookup of Plaid's
 institution list with the products each institution supports; it links nothing and uses no Item.
 
-Linked as of 2026-11-16: 5 of the 10 Trial Items (four banks, one of them through two separate
-logins of the household). The Wallet-only bank stays on Wallet.
+Linked as of 2026-11-16: 5 of the 10 Trial Items (banks A, B, C and D, one of them through two separate
+logins of the household). One more bank is read only through Wallet.
 
 ### 4.5 Local-only features
 
@@ -313,7 +321,7 @@ logins of the household). The Wallet-only bank stays on Wallet.
 | Worker `/wallet` cache | 10 min (1 min floor for forced reads), per Worker isolate |
 | Plaid balances | real time at most every 5 min per bank (`/accounts/balance/get`), otherwise Plaid's latest refresh (`/accounts/get`); Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min (1 min when forced) |
 | Plaid pending list | Plaid's own transaction updates, typically a few times a day |
-| Wallet (the Wallet-only bank and any bank not on Plaid) | whenever Wallet syncs the bank; opening the Wallet app forces it; posted transactions only |
+| Wallet (banks not linked through Plaid) | whenever Wallet syncs the bank; opening the Wallet app forces it; posted transactions only |
 
 ## 6. Configuration and secrets
 
@@ -330,12 +338,13 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 | `PLAID_CLIENT_ID` | text | Plaid client id |
 | `PLAID_SECRET` | secret | Plaid Production secret |
 | `PLAID_ENV` | text, optional | `production` (default) or `sandbox` |
-| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
+| `PLAID_COUNTRY_CODES` | text | comma-separated Plaid country codes for Link and the institution search (kept out of the code) |
+| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `labels` (private display labels), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
 
 Elsewhere:
 
 - **Browser `localStorage`:** `pt.conn` (Worker URL + TOKEN), `pt.remote` (last snapshot),
-  `pt.wallet` (last `/wallet` answer), `pt.extra` (manual account), `pt.plaidLink` (link token during
+  `pt.wallet` (last `/wallet` answer), `pt.extra` (manual account), `pt.labels` (private labels), `pt.plaidLink` (link token during
   OAuth), `pt.settings` and other UI preferences.
 - **Snapshot `config`:** Yahoo proxy URL and Finnhub key, written by the brief.
 - **Brief:** `config.json` in the plugin; constants (artifact URL, Drive folder ids) in `SKILL.md`.
@@ -361,11 +370,9 @@ Elsewhere:
 - **Plaid Trial plan:** 10 Items; removing an Item does not free its slot and linking the same bank
   twice uses two. Use "Riconnetti" (update mode) for expired logins. OAuth banks may need the PWA URL
   in "Allowed redirect URIs".
-- **The Wallet-only bank** is read through Wallet only (Plaid is set up for the linked banks; direct open banking access needs a
-  licensed provider and is limited to 4 unattended reads a day).
+- **Banks not linked through Plaid** are read through Wallet only.
 - **Alternatives evaluated:** Teller (one of the banks not covered, developer sign-up not available),
-  SimpleFIN (coverage and pending support not verified), Enable Banking (coverage of the Wallet-only bank
-  not verified).
+  SimpleFIN (coverage and pending support not verified), Enable Banking (coverage not verified).
 - **Cloudflare free plan:** 100k Worker requests/day, KV 100k reads and 1k writes a day; far above
   this use (about 300 KV writes a day: the two caches every 10 minutes).
 - **The brokerage via Plaid Investments** was tried on 2026-11-16 and reverted: Plaid lists the
