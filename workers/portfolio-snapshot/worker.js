@@ -437,7 +437,7 @@ async function walletSummary(env, force) {
   }
   const kept = all.filter((a) => !WALLET_EXCLUDED_TYPES.has(a.accountType) && !a.isInvestmentAccount);
   const limits = creditLimitOverrides(env);
-  const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits)]);
+  const [yfx, plaid] = await Promise.all([yahooEurUsd(), plaidSummary(env, limits, force)]);
   const fx = yfx || (walletError ? null : await walletEurUsd(env, kept));
   const accounts = mergeAccounts(kept.map((a) => walletAccount(a, limits)), plaid.accounts);
   // Custom names last, so CREDIT_LIMITS and the Wallet/Plaid matching keep using the original names.
@@ -537,6 +537,8 @@ async function plaidExchange(env, input) {
   const item = { itemId: ex.item_id, accessToken: ex.access_token, institutionId, institutionName, linkedAt: new Date().toISOString() };
   await env.PLAID_KV.put(PLAID_ITEM_PREFIX + ex.item_id, JSON.stringify(item));
   walletCache = { at: 0, body: null };
+  plaidCache = { at: 0, items: null, accounts: null };
+  await env.PLAID_KV.delete(PLAID_CACHE_KEY).catch(() => {});
   return { ok: true, itemId: ex.item_id, institutionName };
 }
 
@@ -546,7 +548,9 @@ const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 async function plaidItemData(env, item) {
   const today = Date.now();
   const [bal, tx, itemInfo] = await Promise.allSettled([
-    plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }),
+    // /accounts/get, not /accounts/balance/get: the live-balance endpoint is billed and rate limited
+    // per call (BALANCE_LIMIT hit on 2026-11-16); these balances are Plaid's latest refresh.
+    plaidCall(env, "/accounts/get", { access_token: item.accessToken }),
     plaidCall(env, "/transactions/get", {
       access_token: item.accessToken,
       start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
@@ -555,7 +559,7 @@ async function plaidItemData(env, item) {
     }),
     plaidCall(env, "/item/get", { access_token: item.accessToken }),
   ]);
-  // Last time Plaid refreshed this bank's transactions; the balance itself is read live just now.
+  // Last time Plaid refreshed this bank's data (balances from /accounts/get come from the same refresh).
   const txStatus = itemInfo.status === "fulfilled" && itemInfo.value.status && itemInfo.value.status.transactions;
   const lastSync = (txStatus && txStatus.last_successful_update) || new Date(today).toISOString();
   const status = { itemId: item.itemId, institution: item.institutionName, ok: bal.status === "fulfilled", error: null, pendingKnown: tx.status === "fulfilled", accounts: 0, lastSync };
@@ -639,15 +643,28 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   return acc;
 }
 
-async function plaidSummary(env, limits) {
-  if (!plaidConfigured(env)) return { configured: false, items: [], accounts: [] };
+const PLAID_CACHE_KEY = "plaid:summary";
+/** Plaid answers shared by every Worker isolate (memory first, then KV), so Plaid is called at most
+ * once per WALLET_TTL_MS (WALLET_FORCE_MIN_MS when forced) whatever the number of devices. */
+let plaidCache = { at: 0, items: null, accounts: null };
+
+async function plaidFresh(env, force) {
+  const maxAge = force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS;
+  if (plaidCache.items && Date.now() - plaidCache.at < maxAge) return plaidCache;
+  const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
+  if (shared && shared.items && Date.now() - shared.at < maxAge) return (plaidCache = shared);
   const results = await Promise.all((await plaidItems(env)).map((item) => plaidItemData(env, item)));
-  const accounts = results.flatMap((r) => r.accounts);
-  for (const a of accounts) {
-    // A limit set in CREDIT_LIMITS (by the Wallet name, applied in mergeAccounts) wins; keep Plaid's otherwise.
-    a._limits = limits;
-  }
-  return { configured: true, items: results.map((r) => r.status), accounts };
+  plaidCache = { at: Date.now(), items: results.map((r) => r.status), accounts: results.flatMap((r) => r.accounts) };
+  await env.PLAID_KV.put(PLAID_CACHE_KEY, JSON.stringify(plaidCache)).catch(() => {});
+  return plaidCache;
+}
+
+async function plaidSummary(env, limits, force) {
+  if (!plaidConfigured(env)) return { configured: false, items: [], accounts: [] };
+  const fresh = await plaidFresh(env, force);
+  // A limit set in CREDIT_LIMITS (by the Wallet name, applied in mergeAccounts) wins; keep Plaid's otherwise.
+  const accounts = fresh.accounts.map((a) => ({ ...a, _limits: limits }));
+  return { configured: true, items: fresh.items, accounts };
 }
 
 /**
