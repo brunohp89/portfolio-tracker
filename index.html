@@ -114,6 +114,10 @@ footer a{color:#8fb0ff}
 #connect .card{width:min(520px,100%)}
 #connect-msg{min-height:1.4em;margin-top:6px}
 #boot-msg{padding:40px 16px;color:var(--muted);text-align:center;font-size:14px}
+#monefy{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 16px;border-top:1px solid var(--line)}
+#monefy[hidden]{display:none}
+#monefy .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+#monefy .val{font-size:20px;font-weight:600}
 #wallet-wrap summary{cursor:pointer;padding:10px 6px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
 #wallet-wrap summary b{color:var(--text)}
 #wallet-wrap td.l{max-width:240px;overflow:hidden;text-overflow:ellipsis}
@@ -251,6 +255,8 @@ footer a{color:#8fb0ff}
     <tbody id="closed-body"></tbody>
   </table>
 </details>
+
+<section id="monefy" hidden><span class="lbl">Valore Monefy</span><span class="val num" id="monefy-val">—</span></section>
 
 <footer>
   <div><b>Fonti prezzi.</b> Crypto: Coinbase Exchange (WebSocket in tempo reale e candele storiche; ripiego su Yahoo tramite proxy). Azioni ed ETF: scambi in tempo reale da Finnhub, più Yahoo Finance tramite il tuo proxy per lo storico e gli aggiornamenti a intervalli. I fondi comuni hanno solo il NAV giornaliero.</div>
@@ -2532,6 +2538,7 @@ function refresh() {
       write(LS.remote, remote);
       if (app && configChanged) { location.reload(); return { ok: true, text: 'Nuove impostazioni: ricarico.' }; }
       if (app) app.applyRemote(r.snap);
+      renderMonefy();
       return { ok: true, text: `Posizioni aggiornate al ${r.snap.asof}.` };
     } catch (err) {
       return { ok: false, text: errorText(err) };
@@ -2702,8 +2709,26 @@ el('extra-sign').onclick = () => {
 el('extra-clear').onclick = () => { el('extra-amount').value = ''; el('extra-form').requestSubmit(); };
 fillExtraForm();
 
+/**
+ * Valore Monefy = all account balances in USD (the Conti total, manual account included) + the
+ * broker's deposits minus its withdrawals (its dated external flows in the brief's snapshot).
+ */
+function renderMonefy() {
+  const box = el('monefy');
+  const bank = bankTotalUsd();
+  const flows = remote && remote.snap && remote.snap.flows;
+  const key = labels && labels.brokerKey;
+  const list = flows && key ? flows[key] : null;
+  if (bank == null || !Array.isArray(list)) { box.hidden = true; return; }
+  const net = list.reduce((sum, row) => sum + (Number(row[1]) || 0), 0);
+  el('monefy-val').textContent = fmtMoney(bank + net, 'USD');
+  box.title = `Conti ${fmtMoney(bank, 'USD')} + versamenti netti del broker ${fmtMoney(net, 'USD')}`;
+  box.hidden = false;
+}
+
 function renderWallet() {
   if (app && app.bankChanged) app.bankChanged();
+  renderMonefy();
   const wrap = el('wallet-wrap');
   if (!wallet && !walletErr) { wrap.hidden = true; return; }
   wrap.hidden = false;
