@@ -181,7 +181,9 @@ sequenceDiagram
     W-->>P: cached summary
   else
     par Wallet
-      W->>B: GET /accounts (paginated), GET /records?convertTo=USD (EURUSD of latest EUR record)
+      W->>B: GET /accounts (paginated)
+    and FX
+      W->>W: EURUSD from Yahoo Finance (fallback: Wallet's rate on the latest EUR record)
     and Plaid, per linked bank
       W->>K: list item:* (access tokens)
       W->>L: /accounts/balance/get (live from the bank)
@@ -208,7 +210,8 @@ Balance rules:
   the listed pending transactions, then the two guards below.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
-- **FX:** EURUSD is the rate Wallet applied to the latest EUR record (not a live market rate).
+- **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
+  if Yahoo does not answer, the rate Wallet applied to the latest EUR record (shown as such).
 - **If a Plaid bank fails**, its accounts fall back to the Wallet data and the bank is listed with its
   Plaid error code; login errors show a "Riconnetti" button (Plaid update mode, uses no new Item).
 

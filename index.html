@@ -2743,7 +2743,9 @@ function renderWallet() {
     parts.push(d.pendingIncluded
       ? 'Conti collegati con Plaid: saldo della banca con i movimenti in sospeso inclusi; gli altri dai movimenti registrati in Wallet.'
       : 'Saldi calcolati da Wallet sui movimenti registrati.');
-    if (d.fx) parts.push(`Cambio EURUSD ${d.fx.rate.toFixed(4)} di Wallet al ${fmtDay(d.fx.asOf)}.`);
+    if (d.fx) parts.push(d.fx.source === 'yahoo'
+      ? `Cambio EURUSD ${d.fx.rate.toFixed(4)} da Yahoo Finance (${fmtWhen(Date.parse(d.fx.at))}).`
+      : `Cambio EURUSD ${d.fx.rate.toFixed(4)} di Wallet al ${fmtDay(d.fx.asOf)} (Yahoo non disponibile).`);
   }
   if (walletErr) parts.push(`Aggiornamento non riuscito: ${walletErr}.`);
   el('wallet-info').textContent = parts.join(' ');
