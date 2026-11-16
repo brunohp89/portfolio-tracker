@@ -2710,19 +2710,27 @@ el('extra-clear').onclick = () => { el('extra-amount').value = ''; el('extra-for
 fillExtraForm();
 
 /**
- * Valore Monefy = all account balances in USD (the Conti total, manual account included) + the
- * broker's deposits minus its withdrawals (its dated external flows in the brief's snapshot).
+ * Valore Monefy, as the owner defined it: a plain numeric sum with NO currency conversion. Each
+ * account's balance is added in its own currency as a bare number (euro accounts as euro numbers,
+ * dollar accounts as dollar numbers, manual account included), plus the broker's deposits minus its
+ * withdrawals in dollars as they are (its dated external flows in the brief's snapshot). The result
+ * mixes currencies on purpose, so it is shown without a currency symbol.
  */
 function renderMonefy() {
   const box = el('monefy');
-  const bank = bankTotalUsd();
+  const d = wallet && wallet.data;
   const flows = remote && remote.snap && remote.snap.flows;
   const key = labels && labels.brokerKey;
   const list = flows && key ? flows[key] : null;
-  if (bank == null || !Array.isArray(list)) { box.hidden = true; return; }
+  if (!d || !Array.isArray(list)) { box.hidden = true; return; }
+  const byCurrency = accountTotals(d).byCurrency;
+  const accounts = Object.values(byCurrency).reduce((sum, v) => sum + (Number(v) || 0), 0);
   const net = list.reduce((sum, row) => sum + (Number(row[1]) || 0), 0);
-  el('monefy-val').textContent = fmtMoney(bank + net, 'USD');
-  box.title = `Conti ${fmtMoney(bank, 'USD')} + versamenti netti del broker ${fmtMoney(net, 'USD')}`;
+  const plain = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  el('monefy-val').textContent = plain(accounts + net);
+  box.title = 'Somma senza conversioni: ' +
+    Object.entries(byCurrency).map(([cur, v]) => `conti in ${cur} ${plain(v)}`).join(' + ') +
+    ` + versamenti netti del broker in USD ${plain(net)}`;
   box.hidden = false;
 }
 
