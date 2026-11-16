@@ -227,7 +227,7 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
-  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo live dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span></div>
+  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span></div>
   <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
@@ -2729,7 +2729,7 @@ function renderWallet() {
       tr.append(creditCell(a.credit, a.currency));
       tr.append(cell(fmtDay(a.lastRecordDate), 'num last'));
       const sync = cell(fmtSyncDay(a.lastSync), 'num sync');
-      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? ' (movimenti via Plaid; il saldo è letto in tempo reale)' : ' (ultima modifica registrata da Wallet)');
+      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? ' (ultimo aggiornamento di saldo e movimenti da parte di Plaid)' : ' (ultima modifica registrata da Wallet)');
       tr.append(sync);
       body.append(tr);
     }
