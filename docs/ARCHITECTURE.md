@@ -165,6 +165,18 @@ Engine facts worth knowing (from the plugin README):
 KPIs (value, day change, open/closed/total P&L, XIRR, TWR, benchmark TWR) are recomputed from
 positions × live prices plus the brief's flows and history in the snapshot.
 
+**Time zone.** Midnight (start of daily and weekly candles, the day's change, the day rollover) and
+every time shown follow one time zone: the device's by default (on a phone it follows the location
+when the clock is set automatically, and the app picks up a change within a second), or one chosen
+in Settings or by tapping the clock (`localStorage` `pt.tz`; empty = automatic). The clock shows its
+short name. Offsets come from `Intl.DateTimeFormat` (cached per 15 minutes), so DST is handled per
+zone. Chart times are bars shifted to that zone's wall clock (Lightweight Charts renders UTC), so a
+daily candle shows its own date on either side of UTC.
+
+**NYSE pill.** Next to the dot, the time to the next bell of the regular session ("chiude tra 1h
+05m", "apre tra 2g 16h"), from the same NYSE calendar used for the dot (weekends, holidays,
+13:00 early closes).
+
 ### 4.3 Bank accounts and net worth
 
 The "Conti" section and the "Patrimonio totale" KPI come from `GET /wallet` on the Worker.
@@ -357,7 +369,7 @@ logins of the household). One more bank is read only through Wallet.
 
 - **Manual account** under the Conti table (name, amount, USD/EUR, a "±" button for debts): stored in
   `localStorage` (`pt.extra`), counted in the totals and in the net worth, only in that browser.
-- **Settings modal:** Yahoo proxy URL and token, Finnhub key, poll interval, snapshot import/export.
+- **Settings modal:** time zone, Yahoo proxy URL and token, Finnhub key, poll interval, snapshot import/export.
 
 ## 5. Refresh cadence
 

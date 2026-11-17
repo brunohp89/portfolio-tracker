@@ -74,6 +74,8 @@ td.sym{font-family:var(--mono);font-weight:600;cursor:pointer}
 .mk{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:#4a5163}
 .mk.open{background:var(--up);box-shadow:0 0 5px var(--up)}
 .mk.closed{background:var(--down)}
+.pill .cd{font-size:10px;color:var(--muted);opacity:.85}
+#pill-clock{cursor:pointer}
 td.sym:hover{color:#8fb0ff}
 td.nm{color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .src{font-size:10px;padding:1px 6px;border-radius:8px;border:1px solid var(--line);color:var(--muted)}
@@ -100,6 +102,7 @@ footer a{color:#8fb0ff}
 .card h2{margin:0 0 12px;font-size:16px}
 .card h3{margin:18px 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 .field{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.field select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;font:inherit}
 .field input,.field textarea{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;font:inherit}
 .field textarea{font-family:var(--mono);font-size:11px;height:180px}
 .hint{color:var(--muted);font-size:12px}
@@ -180,8 +183,8 @@ footer a{color:#8fb0ff}
   <div class="pills">
     <span class="pill" id="pill-crypto"><span class="dot"></span>Crypto</span>
     <span class="pill" id="pill-stocks"><span class="dot"></span>Azioni/fondi</span>
-    <span class="pill" id="pill-nyse"><span class="mk" id="nyse-dot"></span><span id="nyse-txt">NYSE</span></span>
-    <span class="pill" id="pill-clock"><span class="num" id="clock">--:--:--</span></span>
+    <span class="pill" id="pill-nyse"><span class="mk" id="nyse-dot"></span><span id="nyse-txt">NYSE</span><span class="cd" id="nyse-cd"></span></span>
+    <span class="pill" id="pill-clock" title="Fuso orario"><span class="num" id="clock">--:--:--</span><span class="cd" id="clock-tz"></span></span>
     <button class="iconbtn" id="btn-settings" title="Impostazioni">⚙ Impostazioni</button>
   </div>
 </header>
@@ -191,7 +194,7 @@ footer a{color:#8fb0ff}
 <section class="kpis">
   <div class="kpi big" id="k-nw-box" hidden><div class="lbl">Patrimonio totale</div><div class="val num" id="k-nw">—</div><div class="sub num" id="k-nw-sub"></div></div>
   <div class="kpi big"><div class="lbl" id="k-scope-lbl">Valore</div><div class="val num" id="k-value">—</div><div class="sub num" id="k-value-eur"></div></div>
-  <div class="kpi" title="Dalla mezzanotte (ora locale), come la candela giornaliera"><div class="lbl">Variazione giorno</div><div class="val num" id="k-day">—</div></div>
+  <div class="kpi" title="Dalla mezzanotte (nel fuso orario scelto), come la candela giornaliera"><div class="lbl">Variazione giorno</div><div class="val num" id="k-day">—</div></div>
   <div class="kpi"><div class="lbl">P&amp;L aperto</div><div class="val num" id="k-pnl">—</div></div>
   <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
   <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
@@ -292,6 +295,8 @@ footer a{color:#8fb0ff}
 <div id="modal">
   <div class="card">
     <h2>Impostazioni</h2>
+    <h3>Fuso orario</h3>
+    <div class="field"><label for="set-tz">Fuso orario per la mezzanotte (candele giornaliere, variazione del giorno) e per tutti gli orari</label><select id="set-tz"></select><span class="hint" id="tz-hint"></span></div>
     <h3>Prezzi di azioni, ETF e fondi</h3>
     <div class="field"><label>URL del proxy Yahoo (Cloudflare Worker)</label><input id="set-proxy" placeholder="https://yahoo-proxy.tuonome.workers.dev"><span class="hint">Già impostato sul tuo Worker. Cambialo solo se usi un altro proxy; lasciando il campo vuoto torna quello predefinito.</span></div>
     <div class="field"><label>Token del proxy (opzionale)</label><input id="set-token" placeholder="vuoto se il Worker non ha la variabile TOKEN"></div>
@@ -385,6 +390,55 @@ export default {
 </script>
 <script>
 /* The tracker itself. It starts once the loader below has a snapshot to give it. */
+/* ------------------------------------------------------------------ time zone
+   Top-level, so the tracker and the loader below share it (classic scripts share the global scope). */
+/** Device time zone: on a phone it follows the location when the clock is set automatically. */
+const deviceTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
+function validTz(z) {
+  if (!z || typeof z !== 'string') return '';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch { return ''; }
+}
+let tzChoice = (() => { try { return validTz(JSON.parse(localStorage.getItem('pt.tz') || '""')); } catch { return ''; } })(); // '' = automatic (device time zone)
+/** Time zone that sets midnight (daily candles, the day's change) and every time shown. */
+const TZ = () => tzChoice || deviceTz();
+const tzFmt = new Map();
+function tzParts(tSec, zone = TZ()) {
+  let f = tzFmt.get(zone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    tzFmt.set(zone, f);
+  }
+  const o = {};
+  for (const x of f.formatToParts(new Date(tSec * 1000))) o[x.type] = x.value;
+  return { y: +o.year, mo: +o.month, d: +o.day, h: +o.hour % 24, mi: +o.minute, s: +o.second };
+}
+const tzOffCache = new Map();
+/** Seconds to add to UTC to get the wall-clock time of the zone at instant t (cached per 15 minutes:
+ * offsets only change on quarter hours). */
+function tzOffset(t, zone = TZ()) {
+  const key = zone + '|' + Math.floor(t / 900);
+  let off = tzOffCache.get(key);
+  if (off == null) {
+    const x = tzParts(t, zone);
+    off = Date.UTC(x.y, x.mo - 1, x.d, x.h, x.mi, x.s) / 1000 - Math.floor(t);
+    if (tzOffCache.size > 50000) tzOffCache.clear();
+    tzOffCache.set(key, off);
+  }
+  return off;
+}
+/** Midnight of the wall date y-mo-d in the zone, as a UTC timestamp. */
+function tzMidnight(y, mo, d, zone = TZ()) {
+  const wall = Date.UTC(y, mo - 1, d) / 1000;
+  const t = wall - tzOffset(wall, zone);
+  const off2 = tzOffset(t, zone); // the offset at midnight itself (DST may differ from the guess)
+  return wall - off2;
+}
+/** Short name of the zone right now, e.g. EST or GMT+1. */
+const tzAbbr = (zone = TZ()) => {
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'short' }).formatToParts(new Date()).find((x) => x.type === 'timeZoneName').value; }
+  catch { return zone; }
+};
+
 window.startTracker = function (BOOT) {
 /* Private names come from the Worker (/labels, kept in its KV) so this public code holds placeholders
    only: BROKER is the brokerage's display name and the `account` value of its positions in the
@@ -580,6 +634,39 @@ function marketStatus(kind, tSec = nowSec()) {
   return { open: false, label: 'NYSE chiusa' + fund };
 }
 
+/** UTC timestamp of a New York wall-clock time on a New York date (YYYY-MM-DD). */
+function nyWallTs(date, h, m) {
+  const [y, mo, d] = date.split('-').map(Number);
+  const wall = Date.UTC(y, mo - 1, d, h, m) / 1000;
+  return wall - nyOffset(wall - nyOffset(wall));
+}
+/** Seconds until the regular session closes (open) or next opens (closed), holidays and early closes included. */
+function nyseCountdown(tSec = nowSec()) {
+  const p = nyParts(tSec);
+  if (marketStatus('equity', tSec).open) {
+    const close = nyseCalendar(+p.date.slice(0, 4)).early.has(p.date) ? 13 : 16;
+    return { open: true, sec: nyWallTs(p.date, close, 0) - tSec };
+  }
+  const [y, mo, d] = p.date.split('-').map(Number);
+  for (let i = 0; i < 14; i++) {
+    const day = new Date(Date.UTC(y, mo - 1, d + i));
+    const iso = day.toISOString().slice(0, 10);
+    const wd = day.getUTCDay();
+    if (wd === 0 || wd === 6 || nyseCalendar(day.getUTCFullYear()).hol.has(iso)) continue;
+    const open = nyWallTs(iso, 9, 30);
+    if (open > tSec) return { open: false, sec: open - tSec };
+  }
+  return null;
+}
+/** 45m, 3h 05m, 2g 4h */
+function fmtCountdown(sec) {
+  const m = Math.max(1, Math.ceil(sec / 60));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`;
+  return `${Math.floor(h / 24)}g ${h % 24}h`;
+}
+
 function isUsMarketWindow(tSec = nowSec()) {
   const p = nyParts(tSec);
   if (p.wd === 'Sat' || p.wd === 'Sun') return false;
@@ -618,8 +705,8 @@ function rangeStart(range, iv, cryptoOnly) {
   }
   return now - days * 86400;
 }
-/** Seconds to add to UTC to get local wall-clock time at instant t. */
-const localOffset = (t) => -new Date(t * 1000).getTimezoneOffset() * 60;
+/** Seconds to add to UTC to get wall-clock time at instant t, in the selected time zone. */
+const localOffset = (t) => tzOffset(t);
 /**
  * Start of the bar containing t. Bars of 4 hours or more follow local wall-clock time, so a
  * daily candle runs from local midnight to midnight and a weekly one starts on Monday.
@@ -634,12 +721,16 @@ function bucketStart(t, sec) {
   const off2 = localOffset(start); // DST may change between the bar start and t
   return off2 === off ? start : b - off2;
 }
-/** Local midnight (as a UTC timestamp) of a YYYY-MM-DD date. */
-const localDayTs = (iso) => { const [y, m, d] = iso.slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d).getTime() / 1000; };
-const localMidnight = (t = nowSec()) => { const d = new Date(t * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
-/** Lightweight Charts renders UTC; shift intraday times so the axis shows local time. */
+/** Midnight in the selected time zone (as a UTC timestamp) of a YYYY-MM-DD date. */
+const localDayTs = (iso) => { const [y, m, d] = iso.slice(0, 10).split('-').map(Number); return tzMidnight(y, m, d); };
+const localMidnight = (t = nowSec()) => { const x = tzParts(t); return tzMidnight(x.y, x.mo, x.d); };
+/**
+ * Lightweight Charts renders times as UTC: shift every bar to the wall-clock time of the selected
+ * zone, so intraday axes show that zone's hours and a daily candle (starting at its midnight) shows
+ * its own date whatever side of UTC the zone is on.
+ */
 function toChartTime(t) {
-  return INTERVALS[state.interval].intraday ? t - new Date(t * 1000).getTimezoneOffset() * 60 : t;
+  return t + localOffset(t);
 }
 
 /* ------------------------------------------------------------------ network */
@@ -1255,7 +1346,7 @@ function exactShade(ts, w, axisH) {
     left = Math.max(0, Math.round(x));
   }
   if (left >= w) return '';
-  const day = new Date(t0 * 1000).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' });
+  const day = new Date(t0 * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' });
   return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${day}</span></div>`;
 }
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
@@ -1348,6 +1439,9 @@ function renderRealOverlay() {
   const lastC = cps.length ? cps[cps.length - 1].value : null;
   const lastAgg = state.agg[state.agg.length - 1];
   if (lastC != null && lastAgg && lastAgg.t > cps[cps.length - 1].time) cps.push({ time: lastAgg.t, value: lastC });
+  // Same time mapping as the main series (strictly increasing).
+  let prevT = -Infinity;
+  for (const c of cps) { c.time = Math.max(toChartTime(c.time), prevT + 1); prevT = c.time; }
   contribSeries = chart.addSeries(LWC.LineSeries, { color: '#8a93a6', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'versamenti', crosshairMarkerVisible: false,
     autoscaleInfoProvider: () => null }); // do not squash the value scale
   contribSeries.setData(cps);
@@ -1356,8 +1450,8 @@ function renderRealOverlay() {
 function fmtBarTime(t) {
   const iv = INTERVALS[state.interval];
   const d = new Date(t * 1000);
-  if (!iv.intraday) return d.toLocaleDateString('it-IT', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric' }) + (iv.sec === 604800 ? ' (sett.)' : '');
-  return d.toLocaleString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  if (!iv.intraday) return d.toLocaleDateString('it-IT', { timeZone: TZ(), day: '2-digit', month: 'short', year: 'numeric' }) + (iv.sec === 604800 ? ' (sett.)' : '');
+  return d.toLocaleString('it-IT', { timeZone: TZ(), day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 function updateLegend(param) {
   if (!state.agg.length) { $('legend').innerHTML = ''; return; }
@@ -1389,7 +1483,7 @@ function soloLegend(b) {
 /** In "current positions" mode: the day from which the chart is the real value of the view. */
 function exactSinceText() {
   const d = positionsExactSince();
-  return d ? `</b> <span class="muted">· uguale al reale dal ${new Date(localDayTs(d) * 1000).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}</span><b>` : '';
+  return d ? `</b> <span class="muted">· uguale al reale dal ${new Date(localDayTs(d) * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' })}</span><b>` : '';
 }
 function legendTitle() {
   if (state.scope === 'custom') {
@@ -1885,12 +1979,12 @@ function twrStats() {
     while (i >= 0 && b.idx[i] == null) i--;
     return i >= b.start ? I / b.idx[i] - 1 : null;
   };
-  const today = new Date();
+  const year = tzParts(now / 1000).y; // the current year in the selected time zone
   const years = (now - isoDayMs(b.dates[b.start])) / DAY_MS / YEAR_DAYS;
   const yearAgo = new Date(now - 365 * DAY_MS).toISOString().slice(0, 10);
   return { total: I - 1, ann: years > 0.5 ? Math.pow(I, 1 / years) - 1 : null, years, first: b.dates[b.start],
-           ytd: since(`${today.getFullYear()}-01-01`), y1: since(yearAgo), step, lastDate: b.dates[b.last],
-           base: b, ytdFrom: `${today.getFullYear()}-01-01`, y1From: yearAgo };
+           ytd: since(`${year}-01-01`), y1: since(yearAgo), step, lastDate: b.dates[b.last],
+           base: b, ytdFrom: `${year}-01-01`, y1From: yearAgo };
 }
 function renderTwr() {
   const el = $('k-twr'), box = el.parentElement;
@@ -2168,7 +2262,25 @@ $('tbody').addEventListener('click', (e) => {
 
 /* ------------------------------------------------------------------ settings, import, export */
 $('worker-code').value = $('worker-src').textContent.trim();
+/** Fills the time zone list: automatic first, then every zone the browser knows. */
+function fillTzSelect() {
+  const sel = $('set-tz');
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch { /* older browsers */ }
+  if (!zones.length) zones = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Europe/Rome', 'UTC'];
+  for (const z of [deviceTz(), tzChoice]) if (z && !zones.includes(z)) zones.push(z);
+  sel.replaceChildren();
+  const auto = document.createElement('option');
+  auto.value = ''; auto.textContent = `Automatico: ${deviceTz()} (${tzAbbr(deviceTz())})`;
+  sel.append(auto);
+  for (const z of [...zones].sort()) { const o = document.createElement('option'); o.value = z; o.textContent = z.replace(/_/g, ' '); sel.append(o); }
+  sel.value = tzChoice;
+  $('tz-hint').textContent = tzChoice
+    ? `Fisso su ${tzChoice}: resta questo anche se ti sposti.`
+    : 'Segue il fuso del telefono, che si aggiorna da solo in base a dove ti trovi.';
+}
 function openSettings() {
+  fillTzSelect();
   $('set-proxy').value = state.settings.proxy || DEFAULT_PROXY;
   $('set-token').value = state.settings.token || '';
   $('set-finnhub').value = state.settings.finnhub || DEFAULT_FINNHUB;
@@ -2180,6 +2292,14 @@ function openSettings() {
 }
 const msg = (t, bad) => { $('msg').innerHTML = `<span class="${bad ? 'down' : 'up'}">${t}</span>`; };
 $('btn-settings').onclick = openSettings;
+$('pill-clock').onclick = () => { openSettings(); $('set-tz').focus(); };
+$('set-tz').onchange = () => {
+  tzChoice = validTz($('set-tz').value);
+  if (tzChoice) store.set('tz', tzChoice); else store.del('tz');
+  fillTzSelect();
+  tzChanged();
+  tickClock();
+};
 $('btn-close').onclick = () => $('modal').classList.remove('show');
 $('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') $('modal').classList.remove('show'); });
 $('btn-save').onclick = () => {
@@ -2414,13 +2534,27 @@ function parseCsv(text) {
 }
 
 /* ------------------------------------------------------------------ boot */
+// Test hook: automated browser tests set window.__ptTest before load to reach these helpers.
+if (window.__ptTest) Object.assign(window.__ptTest, { localDayTs, localMidnight, bucketStart, toChartTime, nyseCountdown, fmtCountdown });
 let lastNyseOpen = null;
+let lastTz = TZ();
+/** The selected (or, in automatic mode, the device's) time zone changed: midnight moved, rebuild. */
+function tzChanged() {
+  lastTz = TZ();
+  ensureDay(); updateKpis(); renderTable(); rebuild(false);
+  window.dispatchEvent(new Event('pt-tz')); // the loader re-renders the bank accounts
+}
 function tickClock() {
-  $('clock').textContent = new Date().toLocaleTimeString('it-IT');
+  if (TZ() !== lastTz) tzChanged(); // automatic mode follows the phone when it changes zone
+  $('clock').textContent = new Date().toLocaleTimeString('it-IT', { timeZone: TZ() });
+  $('clock-tz').textContent = tzAbbr();
+  $('pill-clock').title = `Fuso orario: ${TZ()}` + (tzChoice ? ' (scelto nelle impostazioni)' : ' (automatico, dal dispositivo)') + '. Tocca per cambiarlo.';
   if (dayRef.day != null && dayRef.day !== localMidnight()) { ensureDay(); updateKpis(); renderTable(); rebuild(false); }
   const st = marketStatus('equity');
   $('nyse-dot').className = 'mk ' + (st.open ? 'open' : 'closed');
   $('nyse-txt').textContent = st.open ? 'NYSE aperta' : 'NYSE chiusa';
+  const cd = nyseCountdown();
+  $('nyse-cd').textContent = cd ? (cd.open ? 'chiude tra ' : 'apre tra ') + fmtCountdown(cd.sec) : '';
   $('pill-nyse').title = st.label;
   if (lastNyseOpen !== null && lastNyseOpen !== st.open) renderTable(); // flip the table dots at the bell
   lastNyseOpen = st.open;
@@ -2508,7 +2642,7 @@ function cleanUrl(raw) {
 }
 const validSnap = (s) => !!s && typeof s.asof === 'string' && Array.isArray(s.positions) && s.positions.length > 0;
 const configOf = (s) => JSON.stringify((s && s.config) || {});
-const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'mai';
+const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString('it-IT', { timeZone: TZ(), day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'mai';
 
 /** @returns {Promise<{changed: boolean, snap?: object, etag?: string, modified?: number}>} */
 async function download(c, etag) {
@@ -2625,11 +2759,12 @@ let walletErr = '';
 let walletBusy = false;
 /** A bank-synced account not synced for longer than this gets the alarm icon. */
 const SYNC_ALARM_MS = 24 * 60 * 60 * 1000;
-const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
+const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { timeZone: TZ(), day: '2-digit', month: '2-digit' }) : '—';
 /** Time if today, else the day: when Plaid last refreshed a bank's transactions (pending list included). */
 const fmtTxWhen = (iso) => {
   const d = new Date(iso);
-  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }) : fmtSyncDay(iso);
+  const day = (x) => x.toLocaleDateString('en-CA', { timeZone: TZ() });
+  return day(d) === day(new Date()) ? d.toLocaleTimeString('it-IT', { timeZone: TZ(), hour: '2-digit', minute: '2-digit' }) : fmtSyncDay(iso);
 };
 
 const fmtMoney = (v, cur) => {
@@ -2637,7 +2772,7 @@ const fmtMoney = (v, cur) => {
   const sym = cur === 'EUR' ? '€' : cur === 'USD' ? '$' : cur + ' ';
   return (v < 0 ? '−' : '') + sym + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
-const fmtDay = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }) : '—';
+const fmtDay = (iso) => iso ? new Date(iso.slice(0, 10) + 'T00:00:00Z').toLocaleDateString('it-IT', { timeZone: 'UTC', day: '2-digit', month: '2-digit' }) : '—'; // a date, not an instant
 const fmtWhole = (v, cur) => fmtMoney(v, cur).replace(/\.\d{2}$/, '');
 /** "owed / limit · pct" cell; the amounts are hidden on narrow screens, the percentage stays. */
 function creditCell(c, cur) {
@@ -2811,8 +2946,8 @@ function renderWallet() {
         const al = document.createElement('span');
         al.className = 'alarm'; al.textContent = '⚠️';
         al.title = (syncOld
-          ? `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT')}`
-          : `Movimenti non aggiornati da Plaid dal ${new Date(a.txUpdatedAt).toLocaleString('it-IT')}`)
+          ? `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT', { timeZone: TZ() })}`
+          : `Movimenti non aggiornati da Plaid dal ${new Date(a.txUpdatedAt).toLocaleString('it-IT', { timeZone: TZ() })}`)
           + ': controlla il collegamento' + (a.source === 'plaid' ? ' in Plaid (Riconnetti)' : ' in Wallet');
         name.append(al);
       }
@@ -2843,13 +2978,13 @@ function renderWallet() {
         sync.append(dot);
       }
       sync.append(fmtSyncDay(a.lastSync));
-      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT')}` + (a.source === 'plaid' ? (a.balanceLive ? ' (saldo letto in tempo reale dalla banca)' : ' (saldo e movimenti dall\'ultimo aggiornamento di Plaid)') : ' (ultima modifica registrata da Wallet)');
+      if (a.lastSync) sync.title = `Ultima sincronizzazione: ${new Date(a.lastSync).toLocaleString('it-IT', { timeZone: TZ() })}` + (a.source === 'plaid' ? (a.balanceLive ? ' (saldo letto in tempo reale dalla banca)' : ' (saldo e movimenti dall\'ultimo aggiornamento di Plaid)') : ' (ultima modifica registrata da Wallet)');
       if (a.source === 'plaid' && a.txUpdatedAt) {
         const tx = document.createElement('span');
         tx.className = 'txu';
         tx.textContent = 'mov. ' + fmtTxWhen(a.txUpdatedAt);
         sync.append(tx);
-        sync.title += `. Movimenti e pending aggiornati da Plaid: ${new Date(a.txUpdatedAt).toLocaleString('it-IT')}`;
+        sync.title += `. Movimenti e pending aggiornati da Plaid: ${new Date(a.txUpdatedAt).toLocaleString('it-IT', { timeZone: TZ() })}`;
       }
       tr.append(sync);
       body.append(tr);
@@ -2996,7 +3131,7 @@ function txDetailRow(a) {
     note(`Saldo = contabilizzato dalla banca ${fmtMoney(d.posted, cur)} + in sospeso ${fmtMoney(d.pending, cur)}`
       + (d.unlisted ? ` (di cui trattenute non elencate ${fmtMoney(d.unlisted, cur)})` : '')
       + ` = ${fmtMoney(d.balance, cur)}. I movimenti contabilizzati sono già nel saldo della banca: si aggiungono solo quelli in sospeso.`);
-    if (d.asOf) note(`Movimenti degli ultimi ${d.windowDays} giorni, aggiornati da Plaid il ${new Date(d.asOf).toLocaleString('it-IT')}.`, 'muted');
+    if (d.asOf) note(`Movimenti degli ultimi ${d.windowDays} giorni, aggiornati da Plaid il ${new Date(d.asOf).toLocaleString('it-IT', { timeZone: TZ() })}.`, 'muted');
   } else {
     note('Saldo calcolato da Wallet come somma di tutti i movimenti registrati: qui gli ultimi ' + (d.transactions || []).length + '.');
   }
@@ -3166,6 +3301,10 @@ async function renameAccount(a) {
   } catch (e) { plaidMsg('Rinomina non riuscita: ' + e.message, true); }
 }
 
+// Dates in the accounts table follow the selected time zone.
+window.addEventListener('pt-tz', () => { if (wallet || walletErr) renderWallet(); });
+if (window.__ptTest) Object.assign(window.__ptTest, { fmtDay, fmtTxWhen });
+
 const FORCE_COOLDOWN_MS = 60 * 1000;
 /** Second forced read after asking Plaid to refresh the transactions (more than FORCE_COOLDOWN_MS). */
 const TX_RECHECK_MS = 90 * 1000;
@@ -3192,7 +3331,7 @@ el('wallet-refresh').onclick = async () => {
   if (asked.length) msg.push(`Chiesto a Plaid di riscaricare i movimenti (${names(asked)}).`);
   if (throttled.length) {
     const at = Math.max(...throttled.map((it) => it.txRefreshAt || 0));
-    msg.push(`Movimenti già richiesti a Plaid alle ${new Date(at).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })} (${names(throttled)}): al massimo una volta ogni 5 minuti per banca.`);
+    msg.push(`Movimenti già richiesti a Plaid alle ${new Date(at).toLocaleTimeString('it-IT', { timeZone: TZ(), hour: '2-digit', minute: '2-digit' })} (${names(throttled)}): al massimo una volta ogni 5 minuti per banca.`);
   }
   if (slow.length) msg.push(`Saldo in tempo reale in arrivo in background (${names(slow)}).`);
   if (items.length && !asked.length && !throttled.length) msg.push('Saldi Plaid riletti.');
