@@ -2958,6 +2958,7 @@ function toggleExtraEditor(id) {
  * withdrawals in dollars as they are (its dated external flows in the brief's snapshot). The result
  * mixes currencies on purpose, so it is shown without a currency symbol.
  */
+const MONEFY_NEGATIVE = new Set(['DCA', 'HSA']);
 function renderMonefy() {
   const box = el('monefy');
   const d = wallet && wallet.data;
@@ -2966,8 +2967,8 @@ function renderMonefy() {
   const list = flows && key ? flows[key] : null;
   if (!d || !Array.isArray(list)) { box.hidden = true; return; }
   // The same rows as the Conti table (names, order, manual account), each in its own currency.
-  const rows = [...d.accounts];
-  rows.push(...extraRows());
+  // Owner's rule: the manual accounts named exactly DCA and HSA count as negative here (only here).
+  const rows = [...d.accounts, ...extraRows().map((a) => (MONEFY_NEGATIVE.has(a.name) ? { ...a, balance: -Math.abs(a.balance) } : a))];
   rows.sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base', numeric: true }));
   const accounts = rows.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
   const net = list.reduce((sum, row) => sum + (Number(row[1]) || 0), 0);
