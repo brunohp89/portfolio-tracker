@@ -31,6 +31,7 @@
  *                    ?fresh=1 skips the cache if it is older than WALLET_FORCE_MIN_MS.
  *                    Accounts linked through Plaid replace their Wallet twin (same last 4
  *                    digits) with the bank's live balance, pending transactions included.
+ *   GET /accounts/transactions?id=  latest transactions of one account of /wallet (detail view)
  *   POST /plaid/link-token   {itemId?, redirectUri?} -> {linkToken} to open Plaid Link
  *                            (itemId = update mode, to re-authorise a linked bank)
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
@@ -67,7 +68,7 @@ class HttpError extends Error {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const cors = corsHeaders(request, env);
     try {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
@@ -85,10 +86,11 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (path !== "/check" && path !== "/wallet" && path !== "/labels" && path !== "/plaid/institutions" && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (!["/check", "/wallet", "/labels", "/plaid/institutions", "/accounts/transactions"].includes(path) && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
-      if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1"), 200, cors);
+      if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1", ctx), 200, cors);
+      if (path === "/accounts/transactions") return json(await accountTransactions(env, url.searchParams.get("id")), 200, cors);
       if (path === "/labels") {
         const labels = env.PLAID_KV ? await env.PLAID_KV.get("labels", "json").catch(() => null) : null;
         return json({ ok: true, labels: labels && typeof labels === "object" ? labels : {} }, 200, cors);
@@ -412,14 +414,14 @@ async function loadWalletLast(env) {
   return walletLast;
 }
 
-async function walletSummary(env, force) {
+async function walletSummary(env, force, ctx) {
   if (!env.WALLET_API_TOKEN) throw new HttpError(500, "wallet_not_configured", "set the WALLET_API_TOKEN secret");
   const age = Date.now() - walletCache.at;
   if (walletCache.body && age < (force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS)) return walletCache.body;
   const plaidOn = plaidConfigured(env);
   const limits = creditLimitOverrides(env);
   // Plaid and FX run alongside Wallet: the slowest source sets the response time, not their sum.
-  const sidePromise = Promise.all([yahooEurUsd(), plaidSummary(env, limits, force)]);
+  const sidePromise = Promise.all([yahooEurUsd(), plaidSummary(env, limits, force, ctx)]);
   sidePromise.catch(() => {}); // awaited below; avoids an unhandled rejection on the early returns
 
   let all = null;
@@ -492,7 +494,8 @@ async function walletSummary(env, force) {
 const PLAID_HOSTS = { production: "https://production.plaid.com", sandbox: "https://sandbox.plaid.com" };
 const PLAID_ITEM_PREFIX = "item:";
 /** Pending transactions are looked up in this window; they rarely stay pending longer. */
-const PLAID_PENDING_DAYS = 14;
+/** Transactions are read over this window: pending items rarely stay longer, and it gives ~20 per account. */
+const PLAID_PENDING_DAYS = 30;
 const PLAID_POST_ROUTES = { "/plaid/link-token": plaidLinkToken, "/plaid/exchange": plaidExchange };
 
 const plaidConfigured = (env) => !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.PLAID_KV);
@@ -580,7 +583,7 @@ async function plaidTxRefresh(env, item, prev, today) {
     return { at, blockedUntil, error: (prev && prev.txRefreshError) || null };
   }
   try {
-    await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS);
+    await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken }, PLAID_BACKGROUND_MS);
     return { at: today, blockedUntil: 0, error: null, requested: true };
   } catch (err) {
     // Plaid answers /transactions/refresh only once the bank has answered, which can take longer than
@@ -598,67 +601,111 @@ const rawBalances = (accounts) => (accounts || []).map((a) => ({
   account_id: a.account_id, balances: a.balances, type: a.type, subtype: a.subtype, mask: a.mask, name: a.name, official_name: a.official_name,
 }));
 
-/** Live balances (from the bank) and the pending transactions of one linked bank. */
-async function plaidItemData(env, item, prev, force) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const settle = (promise) => promise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+
+/**
+ * One linked bank: balances (real time when allowed), the last PLAID_PENDING_DAYS of transactions, the
+ * time of Plaid's last transactions update and, on forced reads, an on-demand transactions refresh.
+ *
+ * Banks answer at very different speeds (one took over 12 s for /transactions/refresh), so the answer
+ * is built at a soft deadline (PLAID_SOFT_MS): a real-time read still running then is replaced by
+ * Plaid's cached balances and a refresh still running counts as requested. Neither is abandoned: with
+ * ctx.waitUntil they finish after the response, and the Item is rebuilt and merged into the shared
+ * cache, so the next read (the PWA reads again 90 s after "Aggiorna ora") shows them.
+ */
+async function plaidItemData(env, item, prev, prevAccounts, force, ctx) {
   const today = Date.now();
   // Real-time balance (/accounts/balance/get) is rate limited to 5/min and 30/hour per Item in
   // Production (BALANCE_LIMIT). Use it at most once per PLAID_LIVE_MIN_MS per Item, never while a
-  // BALANCE_LIMIT block is on, and fall back to /accounts/get (Plaid's cached balances) otherwise.
-  // A real-time read younger than PLAID_LIVE_MIN_MS is fresher than Plaid's cache: its balances are
-  // reused, while the transactions are always read again.
-  const blockedUntil = (prev && prev.liveBlockedUntil) || 0;
+  // BALANCE_LIMIT block is on, and use /accounts/get (Plaid's cached balances) otherwise. A real-time
+  // read younger than PLAID_LIVE_MIN_MS is reused, while the transactions are always read again.
   const lastLive = (prev && prev.liveAt) || 0;
   const reuseLive = !!(prev && prev.ok && prev.balanceLive && prev.raw && prev.raw.length && today - lastLive < PLAID_LIVE_MIN_MS);
-  const tryLive = !reuseLive && today >= blockedUntil && today - lastLive >= PLAID_LIVE_MIN_MS;
-  let liveError = null;
+  const tryLive = !reuseLive && today >= ((prev && prev.liveBlockedUntil) || 0) && today - lastLive >= PLAID_LIVE_MIN_MS;
   const ms = {};
   const timed = (key, promise) => {
     const t0 = Date.now();
     return promise.finally(() => { ms[key] = Date.now() - t0; });
   };
-  const balanceRead = (async () => {
-    if (reuseLive) return { data: { accounts: prev.raw }, live: true, reused: true };
-    if (tryLive) {
-      // The real-time read waits for the bank and can take tens of seconds: past PLAID_LIVE_TIMEOUT_MS
-      // Plaid's cached balances are used instead (no block: the next read tries live again).
-      try {
-        return { data: await timed("live", plaidCall(env, "/accounts/balance/get", { access_token: item.accessToken }, PLAID_LIVE_TIMEOUT_MS)), live: true };
-      } catch (err) {
-        liveError = err;
-      }
+  const token = { access_token: item.accessToken };
+  const liveP = tryLive ? settle(timed("live", plaidCall(env, "/accounts/balance/get", token, PLAID_BACKGROUND_MS))) : null;
+  const refreshP = force ? timed("refresh", plaidTxRefresh(env, item, prev, today)) : null;
+  const txP = settle(timed("tx", plaidCall(env, "/transactions/get", {
+    ...token,
+    start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
+    end_date: isoDay(today + 86400000),
+    options: { count: PLAID_TX_COUNT },
+  }, PLAID_CALL_TIMEOUT_MS)));
+  const itemP = settle(timed("item", plaidCall(env, "/item/get", token, PLAID_CALL_TIMEOUT_MS)));
+  const soft = sleep(PLAID_SOFT_MS).then(() => SOFT);
+
+  let balance; // { data, live, at } or { error }
+  let liveLate = false;
+  if (reuseLive) {
+    balance = { data: { accounts: prev.raw }, live: true, at: lastLive };
+  } else {
+    const first = liveP ? await Promise.race([liveP, soft]) : null;
+    if (first && first !== SOFT && first.status === "fulfilled") {
+      balance = { data: first.value, live: true, at: Date.now() };
+    } else {
+      if (first === SOFT) liveLate = true;
+      const cached = await settle(timed("cached", plaidCall(env, "/accounts/get", token, PLAID_CALL_TIMEOUT_MS)));
+      balance = cached.status === "fulfilled" ? { data: cached.value, live: false } : { error: cached.reason };
+      if (first && first !== SOFT) balance.liveError = first.reason;
     }
-    return { data: await timed("cached", plaidCall(env, "/accounts/get", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS)), live: false };
-  })();
-  const [balRead, tx, itemInfo, refresh] = await Promise.allSettled([
-    balanceRead,
-    timed("tx", plaidCall(env, "/transactions/get", {
-      access_token: item.accessToken,
-      start_date: isoDay(today - PLAID_PENDING_DAYS * 86400000),
-      end_date: isoDay(today + 86400000),
-      options: { count: 500 },
-    }, PLAID_CALL_TIMEOUT_MS)),
-    timed("item", plaidCall(env, "/item/get", { access_token: item.accessToken }, PLAID_CALL_TIMEOUT_MS)),
-    force ? timed("refresh", plaidTxRefresh(env, item, prev, today)) : Promise.resolve(null),
-  ]);
-  // Last time Plaid refreshed this bank's data (balances from /accounts/get come from the same refresh).
+  }
+  const [tx, itemInfo] = await Promise.all([txP, itemP]);
+  let refresh = null;
+  let refreshLate = false;
+  if (refreshP) {
+    const r = await Promise.race([refreshP, soft]);
+    if (r === SOFT) refreshLate = true;
+    else refresh = r;
+  }
+  const parts = { balance, tx, itemInfo, refresh, refreshLate, liveLate, ms, prev, prevAccounts, today };
+  const result = plaidBuild(item, parts);
+
+  if (liveLate || refreshLate) {
+    // Finish the slow calls after the response and merge the rebuilt Item into the shared cache.
+    const late = (async () => {
+      const [live, rf] = await Promise.all([liveLate ? liveP : null, refreshLate ? refreshP : null]);
+      const next = { ...parts, liveLate: false, refreshLate: false };
+      if (live && live.status === "fulfilled") next.balance = { data: live.value, live: true, at: Date.now() };
+      else if (live) next.balance = { ...balance, liveError: live.reason };
+      if (refreshLate) next.refresh = rf;
+      const rebuilt = plaidBuild(item, next);
+      rebuilt.status.background = { at: Date.now(), live: !!(live && live.status === "fulfilled"), refresh: refreshLate };
+      await plaidCacheMerge(env, [rebuilt], false);
+    })().catch(() => {});
+    if (ctx && ctx.waitUntil) ctx.waitUntil(late);
+  }
+  return result;
+}
+const SOFT = Symbol("soft deadline");
+
+/** Item status and accounts from the Plaid answers gathered by plaidItemData. */
+function plaidBuild(item, p) {
+  const { balance, tx, itemInfo, prev, today } = p;
+  const txOk = tx.status === "fulfilled";
+  const lastLive = (prev && prev.liveAt) || 0;
+  const live = !!(balance.data && balance.live);
+  const liveAt = live ? balance.at : lastLive;
+  const liveError = balance.liveError || null;
+  // Last time Plaid refreshed this bank's transactions (and so the pending list), whatever the balance read.
   const txStatus = itemInfo.status === "fulfilled" && itemInfo.value.status && itemInfo.value.status.transactions;
-  const live = balRead.status === "fulfilled" && balRead.value.live;
-  const bal = balRead.status === "fulfilled" ? { status: "fulfilled", value: balRead.value.data } : balRead;
-  const reused = live && balRead.value.reused;
-  const liveAt = live ? (reused ? lastLive : today) : lastLive;
-  // Balances: time of the real-time read, or of Plaid's last refresh. Transactions (and so the
-  // pending list) only change when Plaid refreshes them, whatever the balance read: txUpdatedAt.
   const txUpdatedAt = (txStatus && txStatus.last_successful_update) || (prev && prev.txUpdatedAt) || null;
   const lastSync = live ? new Date(liveAt).toISOString() : txUpdatedAt || new Date(today).toISOString();
-  const rf = (refresh.status === "fulfilled" && refresh.value) || {
-    at: (prev && prev.txRefreshAt) || 0, blockedUntil: (prev && prev.txRefreshBlockedUntil) || 0, error: (prev && prev.txRefreshError) || null,
-  };
+  const rf = p.refreshLate
+    ? { at: today, blockedUntil: 0, error: null, requested: true, unconfirmed: true }
+    : p.refresh || { at: (prev && prev.txRefreshAt) || 0, blockedUntil: (prev && prev.txRefreshBlockedUntil) || 0, error: (prev && prev.txRefreshError) || null };
   const status = {
     itemId: item.itemId,
     institution: item.institutionName,
-    ok: bal.status === "fulfilled",
+    builtAt: Date.now(),
+    ok: !!balance.data,
     error: null,
-    pendingKnown: tx.status === "fulfilled",
+    pendingKnown: txOk,
     accounts: 0,
     lastSync,
     txUpdatedAt,
@@ -669,38 +716,69 @@ async function plaidItemData(env, item, prev, force) {
     txRefreshError: rf.error,
     balanceLive: live,
     liveAt,
-    liveBlockedUntil: liveError && liveError.plaidCode === "BALANCE_LIMIT" ? today + PLAID_LIVE_BLOCK_MS : blockedUntil,
-    raw: live ? rawBalances(bal.value.accounts) : null,
-    liveTimedOut: !!(liveError && liveError.plaidCode === "TIMEOUT"),
-    ms, // duration of each Plaid call, for diagnosing slow refreshes
+    liveBlockedUntil: liveError && liveError.plaidCode === "BALANCE_LIMIT" ? today + PLAID_LIVE_BLOCK_MS : (prev && prev.liveBlockedUntil) || 0,
+    liveLate: !!p.liveLate, // real-time read still running when the answer was built: finishing in the background
+    raw: live ? rawBalances(balance.data.accounts) : null,
+    ms: p.ms, // duration of each Plaid call, for diagnosing slow banks
   };
-  if (bal.status !== "fulfilled") {
-    status.error = { code: bal.reason.plaidCode || "plaid_error", message: bal.reason.plaidMessage || String(bal.reason.message) };
+  if (!balance.data) {
+    const e = balance.error || {};
+    status.error = { code: e.plaidCode || "plaid_error", message: e.plaidMessage || String(e.message || e) };
     return { status, accounts: [] };
   }
   const pending = new Map();
   const lastPosted = new Map();
-  if (tx.status === "fulfilled") {
+  const recent = new Map();
+  if (txOk) {
     const txs = tx.value.transactions || [];
     // Guard 1: a posted transaction names the pending one it replaced; never count both.
     const replaced = new Set(txs.filter((t) => !t.pending && t.pending_transaction_id).map((t) => t.pending_transaction_id));
     for (const t of txs) {
-      if (t.pending && replaced.has(t.transaction_id)) continue;
+      const excluded = t.pending && replaced.has(t.transaction_id);
+      const list = recent.get(t.account_id) || [];
+      list.push({
+        date: t.date,
+        name: String(t.merchant_name || t.name || "").slice(0, 80),
+        amount: round2(-(Number(t.amount) || 0)), // Plaid: positive = money leaving; shown from the account's side
+        status: excluded ? "excluded" : t.pending ? "pending" : "posted",
+      });
+      recent.set(t.account_id, list);
+      if (excluded) continue;
       if (t.pending) {
-        const p = pending.get(t.account_id) || { out: 0, count: 0 };
-        p.out += Number(t.amount) || 0; // Plaid: positive amount = money leaving the account
-        p.count += 1;
-        pending.set(t.account_id, p);
+        const pd = pending.get(t.account_id) || { out: 0, count: 0 };
+        pd.out += Number(t.amount) || 0;
+        pd.count += 1;
+        pending.set(t.account_id, pd);
       } else if (!lastPosted.has(t.account_id) || t.date > lastPosted.get(t.account_id)) {
         lastPosted.set(t.account_id, t.date);
       }
     }
   }
-  const accounts = (bal.value.accounts || [])
+  const accounts = (balance.data.accounts || [])
     .filter((a) => a.type !== "investment")
-    .map((a) => ({ ...plaidAccount(a, item, pending.get(a.account_id), tx.status === "fulfilled", lastPosted.get(a.account_id)), lastSync, txUpdatedAt, balanceLive: live, itemId: item.itemId }));
+    .map((a) => {
+      const acc = plaidAccount(a, item, pending.get(a.account_id), txOk, lastPosted.get(a.account_id));
+      const old = !txOk && (p.prevAccounts || []).find((x) => x.id === acc.id);
+      return {
+        ...acc,
+        lastSync,
+        txUpdatedAt,
+        balanceLive: live,
+        itemId: item.itemId,
+        recent: txOk ? latestTransactions(recent.get(a.account_id) || []) : (old && old.recent) || null,
+      };
+    });
   status.accounts = accounts.length;
   return { status, accounts };
+}
+
+/** Newest PLAID_RECENT_TX transactions, newest first (pending before posted on the same day), plus
+ * any counted pending item beyond that, since every one of them is part of the balance. */
+function latestTransactions(list) {
+  const rank = { pending: 0, excluded: 1, posted: 2 };
+  const sorted = [...list].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : rank[a.status] - rank[b.status]));
+  const top = sorted.slice(0, PLAID_RECENT_TX);
+  return top.concat(sorted.slice(PLAID_RECENT_TX).filter((t) => t.status === "pending"));
 }
 
 function plaidAccount(a, item, pend, pendingKnown, lastDate) {
@@ -759,10 +837,16 @@ const PLAID_CACHE_KEY = "plaid:summary";
 const PLAID_LIVE_MIN_MS = 5 * 60 * 1000;
 /** After a BALANCE_LIMIT answer, no real-time read for that Item during this window. */
 const PLAID_LIVE_BLOCK_MS = 60 * 60 * 1000;
-/** Longest wait for a real-time balance read before falling back to Plaid's cached balances. */
-const PLAID_LIVE_TIMEOUT_MS = 8 * 1000;
+/** The answer is built at this point: calls still running finish in the background (ctx.waitUntil). */
+const PLAID_SOFT_MS = 8 * 1000;
+/** Longest wait for a call allowed to finish in the background (real-time balance, transactions refresh). */
+const PLAID_BACKGROUND_MS = 25 * 1000;
 /** Longest wait for any other Plaid call. */
 const PLAID_CALL_TIMEOUT_MS = 12 * 1000;
+/** Transactions read per bank (newest first) over PLAID_PENDING_DAYS. */
+const PLAID_TX_COUNT = 250;
+/** Transactions kept per account for the detail view. */
+const PLAID_RECENT_TX = 20;
 /** At most one /transactions/refresh per Item in this window (Plaid allows 2/min and 120/hour). */
 const PLAID_TX_REFRESH_MIN_MS = 5 * 60 * 1000;
 /** When /transactions/refresh is refused as not enabled, it is not tried again for this long. */
@@ -771,25 +855,67 @@ const PLAID_TX_REFRESH_BLOCK_MS = 24 * 60 * 60 * 1000;
  * once per WALLET_TTL_MS (WALLET_FORCE_MIN_MS when forced) whatever the number of devices. */
 let plaidCache = { at: 0, items: null, accounts: null };
 
-async function plaidFresh(env, force) {
+/** Per Item, the newest status (by builtAt) and its accounts across the given caches. */
+function newestItems(caches) {
+  const byId = new Map();
+  for (const c of caches) {
+    if (!c || !c.items) continue;
+    for (const s of c.items) {
+      const cur = byId.get(s.itemId);
+      if (!cur || (s.builtAt || 0) > (cur.status.builtAt || 0)) {
+        byId.set(s.itemId, { status: s, accounts: (c.accounts || []).filter((a) => a.itemId === s.itemId) });
+      }
+    }
+  }
+  return byId;
+}
+
+/**
+ * Writes Item results into the shared cache without losing a newer result written meanwhile by another
+ * request or by a background completion: the stored value is read again and, per Item, the newest
+ * (builtAt) wins. full = a complete read: its time becomes the cache time and unlinked Items are dropped.
+ */
+async function plaidCacheMerge(env, results, full) {
+  const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
+  const byId = newestItems([shared, plaidCache]);
+  for (const r of results) {
+    const cur = byId.get(r.status.itemId);
+    if (!cur || (r.status.builtAt || 0) >= (cur.status.builtAt || 0)) byId.set(r.status.itemId, r);
+  }
+  const keep = full ? new Set(results.map((r) => r.status.itemId)) : null;
+  const entries = [...byId.values()].filter((e) => !keep || keep.has(e.status.itemId));
+  const base = [shared, plaidCache].filter((c) => c && c.items).sort((a, b) => b.at - a.at)[0];
+  plaidCache = {
+    at: full ? Date.now() : (base && base.at) || 0,
+    items: entries.map((e) => e.status),
+    accounts: entries.flatMap((e) => e.accounts),
+  };
+  await env.PLAID_KV.put(PLAID_CACHE_KEY, JSON.stringify(plaidCache)).catch(() => {});
+  // A background completion makes this isolate's /wallet answer out of date.
+  if (!full) walletCache = { at: 0, body: null };
+  return plaidCache;
+}
+
+async function plaidFresh(env, force, ctx) {
   const maxAge = force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS;
   if (plaidCache.items && Date.now() - plaidCache.at < maxAge) return plaidCache;
   const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
   if (shared && shared.items && Date.now() - shared.at < maxAge) return (plaidCache = shared);
-  // The previous answer carries, per Item, the last real-time read and any BALANCE_LIMIT block.
-  const prev = [plaidCache, shared].filter((c) => c && c.items).sort((a, b) => b.at - a.at)[0];
-  const prevById = new Map(((prev && prev.items) || []).map((s) => [s.itemId, s]));
-  const results = await Promise.all((await plaidItems(env)).map((item) => plaidItemData(env, item, prevById.get(item.itemId), force)));
-  plaidCache = { at: Date.now(), items: results.map((r) => r.status), accounts: results.flatMap((r) => r.accounts) };
-  await env.PLAID_KV.put(PLAID_CACHE_KEY, JSON.stringify(plaidCache)).catch(() => {});
-  return plaidCache;
+  // The previous answer carries, per Item, the last real-time read, any block and the refresh state.
+  const prev = newestItems([plaidCache, shared]);
+  const results = await Promise.all((await plaidItems(env)).map((item) => {
+    const p = prev.get(item.itemId);
+    return plaidItemData(env, item, p && p.status, p && p.accounts, force, ctx);
+  }));
+  return plaidCacheMerge(env, results, true);
 }
 
-async function plaidSummary(env, limits, force) {
+async function plaidSummary(env, limits, force, ctx) {
   if (!plaidConfigured(env)) return { configured: false, items: [], accounts: [] };
-  const fresh = await plaidFresh(env, force);
+  const fresh = await plaidFresh(env, force, ctx);
   // A limit set in CREDIT_LIMITS (by the Wallet name, applied in mergeAccounts) wins; keep Plaid's otherwise.
-  const accounts = fresh.accounts.map((a) => ({ ...a, _limits: limits }));
+  // The transactions stay in the cache: GET /accounts/transactions serves them one account at a time.
+  const accounts = fresh.accounts.map(({ recent, ...a }) => ({ ...a, _limits: limits }));
   // Raw balances (kept for reusing a recent real-time read) stay in the Worker.
   return { configured: true, items: fresh.items.map(({ raw, ...s }) => s), accounts };
 }
@@ -867,4 +993,65 @@ async function renameAccount(env, input) {
   await env.PLAID_KV.put(NAMES_KEY, JSON.stringify(names));
   walletCache = { at: 0, body: null };
   return { ok: true, id, name: name || null };
+}
+
+// ---------- latest transactions of one account (detail view) ----------
+
+/** Wallet records per account, kept briefly so reopening a detail does not call Wallet again. */
+const walletTxCache = new Map();
+const WALLET_TX_TTL_MS = 2 * 60 * 1000;
+const WALLET_RECENT_TX = 20;
+
+/**
+ * GET /accounts/transactions?id=<account id from /wallet>
+ * Plaid accounts: the transactions read with the last balance (no Plaid call), marked pending (counted
+ * in the balance), excluded (pending already replaced by its posted transaction) or posted (already in
+ * the bank's balance). Wallet accounts: the latest records, every one of them part of the balance.
+ */
+async function accountTransactions(env, id) {
+  if (typeof id !== "string" || !/^[A-Za-z0-9:_-]{6,120}$/.test(id)) throw new HttpError(400, "bad_request", "id missing or invalid");
+  if (id.startsWith("plaid:")) {
+    if (!plaidConfigured(env)) throw new HttpError(404, "account_not_found");
+    const shared = plaidCache.items ? null : await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
+    const acc = (((plaidCache.items ? plaidCache : shared) || {}).accounts || []).find((a) => a.id === id);
+    if (!acc) throw new HttpError(404, "account_not_found", "account not in the last Plaid read");
+    return {
+      ok: true,
+      id,
+      source: "plaid",
+      currency: acc.currency,
+      asOf: acc.txUpdatedAt || null,
+      balance: acc.balance,
+      posted: acc.postedBalance,
+      pending: acc.pending ? acc.pending.amount : 0,
+      windowDays: PLAID_PENDING_DAYS,
+      transactions: acc.recent || null,
+    };
+  }
+  if (!env.WALLET_API_TOKEN) throw new HttpError(500, "wallet_not_configured", "set the WALLET_API_TOKEN secret");
+  const hit = walletTxCache.get(id);
+  if (hit && Date.now() - hit.at < WALLET_TX_TTL_MS) return hit.body;
+  if (Date.now() < walletBackoffUntil) throw new HttpError(503, "wallet_rate_limited", "Wallet asked to wait, retry later");
+  const { data } = await walletFetch(env, "records", {
+    accountId: id,
+    sortBy: "-recordDate",
+    limit: String(WALLET_RECENT_TX),
+    recordDate: `gte.${isoDay(Date.now() - 365 * 86400000)}`, // without a date filter Wallet searches 3 months only
+  });
+  const records = data.records || [];
+  const body = {
+    ok: true,
+    id,
+    source: "wallet",
+    currency: (records[0] && records[0].amount && records[0].amount.currencyCode) || null,
+    transactions: records.map((r) => ({
+      date: String(r.recordDate || "").slice(0, 10),
+      name: String(r.note || "").slice(0, 80),
+      amount: round2(Number(r.amount && r.amount.value) || 0),
+      status: r.recordState === "uncleared" ? "uncleared" : "posted",
+      transfer: !!r.transfer,
+    })),
+  };
+  walletTxCache.set(id, { at: Date.now(), body });
+  return body;
 }

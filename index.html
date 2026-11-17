@@ -145,6 +145,22 @@ footer a{color:#8fb0ff}
 #wallet-legend{padding:8px 10px 0;display:flex;flex-wrap:wrap;gap:4px 14px}
 #wallet-wrap .pend{display:block;font-size:11px;color:var(--warn);font-weight:400}
 #wallet-wrap .txu{display:block;font-size:10px;color:var(--muted);font-weight:400;white-space:nowrap}
+#wallet-wrap tr.acc{cursor:pointer}
+#wallet-wrap tr.acc:hover td,#wallet-wrap tr.acc.open td{background:rgba(255,255,255,.03)}
+#wallet-wrap tr.txd td{padding:4px 10px 12px;background:rgba(255,255,255,.03);white-space:normal;text-align:left;max-width:none}
+#wallet-wrap .nw{white-space:nowrap;font-family:var(--mono)}
+#wallet-wrap .txn{font-size:11px;line-height:1.45;margin:2px 0 6px;color:var(--text)}
+#wallet-wrap .txl{display:flex;flex-direction:column;border-top:1px solid var(--line)}
+#wallet-wrap .txr{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--line);font-size:12px}
+#wallet-wrap .txdt{color:var(--muted);font-family:var(--mono);font-size:11px}
+#wallet-wrap .txnm{display:flex;align-items:baseline;min-width:0}
+#wallet-wrap .txnt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+#wallet-wrap .txam{font-family:var(--mono);text-align:right;white-space:nowrap}
+#wallet-wrap .txb{flex:none;display:inline-block;margin-left:6px;padding:0 4px;border:1px solid var(--line);border-radius:4px;font-size:10px;color:var(--muted)}
+#wallet-wrap .txr.pending .txb{color:var(--warn);border-color:var(--warn)}
+#wallet-wrap .txr.pending .txam{color:var(--warn)}
+#wallet-wrap .txr.excluded{opacity:.6}
+#wallet-wrap .txr.excluded .txam{text-decoration:line-through}
 #plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
 #plaid-items .it{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 #plaid-items .bad{color:var(--down)}
@@ -2835,6 +2851,12 @@ function renderWallet() {
       }
       tr.append(sync);
       body.append(tr);
+      if (!a.local) {
+        tr.classList.add('acc');
+        tr.title = 'Tocca per gli ultimi movimenti';
+        tr.onclick = (ev) => { if (!ev.target.closest('button')) toggleTx(a); };
+        if (txOpen.has(a.id)) { tr.classList.add('open'); body.append(txDetailRow(a)); }
+      }
     }
     const t = accountTotals(d);
     const addFoot = (label, value, creditTd, kind) => {
@@ -2897,6 +2919,7 @@ async function refreshWallet(force) {
     wallet = { data: body, fetchedAt: Date.now() };
     walletErr = '';
     write(LS.wallet, wallet);
+    for (const id of txOpen) loadTx(id); // open details follow the new balances
   } catch (err) {
     walletErr = walletErrorText(err);
   } finally {
@@ -2904,6 +2927,96 @@ async function refreshWallet(force) {
     walletBusy = false;
     renderWallet();
   }
+}
+
+// ---------- latest transactions of one account (tap on a row of the Conti table) ----------
+const txOpen = new Set();     // ids of the accounts whose detail is open
+const txData = new Map();     // id -> { at, body } | { at, error } | { loading: true }
+const TX_STALE_MS = 60 * 1000;
+
+function toggleTx(a) {
+  if (txOpen.has(a.id)) { txOpen.delete(a.id); renderWallet(); return; }
+  txOpen.add(a.id);
+  const have = txData.get(a.id);
+  if (!have || (!have.loading && Date.now() - have.at > TX_STALE_MS)) loadTx(a.id);
+  renderWallet();
+}
+
+async function loadTx(id) {
+  if (!conn) return;
+  txData.set(id, { loading: true });
+  try {
+    let res;
+    try {
+      res = await fetch(conn.url + '/accounts/transactions?id=' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' });
+    } catch { throw new Error('Worker non raggiungibile'); }
+    const out = await res.json().catch(() => null);
+    if (!res.ok || !out || !out.ok) throw new Error(res.status === 404 && out && out.error === 'not_found' ? 'il Worker non ha ancora questa funzione' : (out && out.message) || 'HTTP ' + res.status);
+    txData.set(id, { at: Date.now(), body: out });
+  } catch (e) {
+    txData.set(id, { at: Date.now(), error: e.message });
+  }
+  renderWallet();
+}
+
+const TX_LABEL = { pending: 'in sospeso', excluded: 'escluso', uncleared: 'non confermato' };
+const TX_HELP = {
+  pending: 'In sospeso: aggiunto al saldo contabilizzato della banca.',
+  excluded: 'Pending già sostituito dal movimento contabilizzato: non conteggiato, per non contarlo due volte.',
+  posted: 'Contabilizzato: già compreso nel saldo della banca.',
+  uncleared: 'Registrato in Wallet ma non ancora confermato dalla banca: conta nel saldo di Wallet.',
+};
+
+/** Detail row under an account: how the balance is made and its latest transactions. */
+function txDetailRow(a) {
+  const tr = document.createElement('tr');
+  tr.className = 'txd';
+  const td = document.createElement('td');
+  td.colSpan = 5;
+  tr.append(td);
+  const st = txData.get(a.id);
+  // Amounts in a note stay on one line ("−$120.50" never splits after the sign).
+  const note = (text, cls) => {
+    const d = document.createElement('div');
+    d.className = 'txn' + (cls ? ' ' + cls : '');
+    for (const [i, part] of text.split(/([−-]?[$€][\d,.]*\d)/).entries()) {
+      if (!part) continue;
+      if (i % 2) { const n = document.createElement('span'); n.className = 'nw'; n.textContent = part; d.append(n); } else d.append(part);
+    }
+    td.append(d);
+  };
+  if (!st || st.loading) { note('Carico i movimenti…'); return tr; }
+  if (st.error) { note('Movimenti non disponibili: ' + st.error, 'down'); return tr; }
+  const d = st.body;
+  const cur = a.currency || d.currency;
+  if (d.source === 'plaid') {
+    note(`Saldo = contabilizzato dalla banca ${fmtMoney(d.posted, cur)} + in sospeso ${fmtMoney(d.pending, cur)} = ${fmtMoney(d.balance, cur)}. `
+      + 'I movimenti contabilizzati sono già nel saldo della banca: si aggiungono solo quelli in sospeso.');
+    if (d.asOf) note(`Movimenti degli ultimi ${d.windowDays} giorni, aggiornati da Plaid il ${new Date(d.asOf).toLocaleString('it-IT')}.`, 'muted');
+  } else {
+    note('Saldo calcolato da Wallet come somma di tutti i movimenti registrati: qui gli ultimi ' + (d.transactions || []).length + '.');
+  }
+  const list = d.transactions || [];
+  if (!list.length) { note(d.transactions ? 'Nessun movimento nel periodo.' : 'Movimenti non ancora letti: aggiorna.', 'muted'); return tr; }
+  const box = document.createElement('div');
+  box.className = 'txl';
+  for (const t of list) {
+    const row = document.createElement('div');
+    row.className = 'txr ' + t.status;
+    row.title = TX_HELP[t.status] || '';
+    const day = document.createElement('span'); day.className = 'txdt'; day.textContent = fmtDay(t.date);
+    const nm = document.createElement('span'); nm.className = 'txnm';
+    const nt = document.createElement('span'); nt.className = 'txnt'; nt.textContent = t.name || '(senza descrizione)';
+    nm.append(nt);
+    const label = TX_LABEL[t.status] || (t.transfer ? 'trasferimento' : '');
+    if (label) { const b = document.createElement('span'); b.className = 'txb'; b.textContent = label; nm.append(b); }
+    const amt = document.createElement('span'); amt.className = 'txam' + (t.amount > 0 ? ' up' : '');
+    amt.textContent = (t.amount > 0 ? '+' : '') + fmtMoney(t.amount, cur);
+    row.append(day, nm, amt);
+    box.append(row);
+  }
+  td.append(box);
+  return tr;
 }
 
 // ---------- Plaid Link: connect a bank, or re-authorise one (update mode) ----------

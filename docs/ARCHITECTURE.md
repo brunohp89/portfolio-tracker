@@ -78,7 +78,7 @@ flowchart LR
   BB --> WB
 
   PWA -->|"/snapshot"| WS
-  PWA -->|"/wallet, /labels, /plaid/*, /accounts/rename"| WS
+  PWA -->|"/wallet, /labels, /plaid/*, /accounts/*"| WS
   BAPP -->|"/brief"| WS
   PWA -->|"chart, spark"| WY --> YF
   PWA --> CB
@@ -188,7 +188,7 @@ sequenceDiagram
     and Plaid, per linked bank
       W->>K: list item:* (access tokens)
       W->>L: /accounts/balance/get (live, max 1 per 5 min per bank) or /accounts/get (cached), /item/get
-      W->>L: /transactions/get (last 14 days, pending flags)
+      W->>L: /transactions/get (last 30 days, pending flags)
       W->>L: /transactions/refresh (forced reads only, max 1 per 5 min per bank)
     end
     W->>W: drop Investment accounts, map Wallet accounts
@@ -227,6 +227,19 @@ changes when Plaid refreshes the bank's transactions, so Plaid accounts show a s
 date, "mov. HH:MM" (or the day if not today), with `last_successful_update` (`txUpdatedAt` in
 `/wallet`). The ⚠️ also appears when that time is older than 24 hours, even with a fresh balance.
 
+**Latest transactions:** tapping an account row opens, under it, how its balance is made and its
+latest transactions (`GET /accounts/transactions?id=<account id>`, loaded on open, reloaded after
+each refresh while open).
+- Plaid accounts: no Plaid call; the transactions come from the last read (30 days, up to 250 per
+  bank, kept in `plaid:summary` and never sent with `/wallet`). The 20 newest per account plus any
+  counted pending item, each marked **pending** (added to the bank's posted balance), **excluded**
+  (pending already replaced by its posted transaction, guard 1) or **posted** (already inside the
+  bank's balance: shown as context, not summed). The header shows posted + pending = balance.
+- Wallet accounts: the 20 latest records over the last year (one Wallet call, cached 2 minutes in
+  the Worker). Wallet's balance is the sum of all records, so every one of them is part of it;
+  `uncleared` records are marked "non confermato", transfers "trasferimento".
+- The local manual account has no detail.
+
 Per-account source tags in the table: **P** = Plaid (bank balance as of Plaid's latest refresh, pending included),
 **W** = Wallet bank sync, **M** = entered by hand (Wallet cash accounts or the local manual account).
 
@@ -245,17 +258,27 @@ Balance rules:
   Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
   transactions, then the two guards below. The raw balances of a real-time read are kept in the
   shared cache (never sent to the app) so the transactions can be read again while that read is reused.
-  Real-time reads wait for the bank and can take 20 seconds or more: the Worker gives
-  `/accounts/balance/get` 8 seconds, then uses `/accounts/get` (no block, the next read tries live
-  again); every other Plaid call gets 12 seconds. Plaid and Yahoo run alongside Wallet, and the PWA
-  waits up to 40 seconds for `/wallet`. Each bank's status carries `ms`, the duration of each call.
+- **Slow banks (soft deadline and background completion):** real-time reads and
+  `/transactions/refresh` wait for the bank and can take 10 to 20 seconds or more. Each bank's answer
+  is built 8 seconds after its calls start (`PLAID_SOFT_MS`): a real-time read still running is
+  replaced by `/accounts/get` (`liveLate` in the status), a refresh still running counts as requested
+  (`txRefreshUnconfirmed`). Those calls are not abandoned: `ctx.waitUntil` lets them finish after the
+  response (up to 25 seconds), then the bank is rebuilt and merged into `plaid:summary`
+  (`background` in its status), so the next read shows them (the PWA reads again 90 seconds after
+  "Aggiorna ora"). Writes to `plaid:summary` merge instead of overwrite: the stored value is read
+  again and, per bank, the result with the newest `builtAt` wins, so a background completion and a
+  concurrent read cannot erase each other (the worst case is one bank showing its previous result
+  until the next read). One KV key for all banks keeps the writes within the free plan's 1,000 a day.
+  `/transactions/get`, `/item/get` and `/accounts/get` get 12 seconds. Plaid and Yahoo run alongside
+  Wallet, and the PWA waits up to 40 seconds for `/wallet`. Each bank's status carries `ms`, the
+  duration of each call.
 - **On-demand transaction refresh:** a forced read ("Aggiorna ora") also calls
   `/transactions/refresh` for each bank, at most once every 5 minutes per Item (Plaid allows 2 per
   minute and 120 per hour). Plaid fetches asynchronously, so the PWA reads `/wallet?fresh=1` again
   90 seconds later. If Plaid refuses the call as not enabled for the account (it is an add-on), the
   error is shown in the bank's status line and the call is not retried for 24 hours. Plaid answers the
-  call only after the bank does (2.5 to 10 seconds observed, more for some banks); past 12 seconds the
-  Worker stops waiting and counts it as requested (`txRefreshUnconfirmed`), not as an error.
+  call only after the bank does (4 to 10 seconds observed, more for some banks); a slow answer is
+  handled as above, never as an error.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
