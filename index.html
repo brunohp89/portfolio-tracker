@@ -158,7 +158,8 @@ footer a{color:#8fb0ff}
 #wallet-wrap .txam{font-family:var(--mono);text-align:right;white-space:nowrap}
 #wallet-wrap .txb{flex:none;display:inline-block;margin-left:6px;padding:0 4px;border:1px solid var(--line);border-radius:4px;font-size:10px;color:var(--muted)}
 #wallet-wrap .txr.pending .txb{color:var(--warn);border-color:var(--warn)}
-#wallet-wrap .txr.pending .txam{color:var(--warn)}
+#wallet-wrap .txr.pending .txam,#wallet-wrap .txr.hold .txam{color:var(--warn)}
+#wallet-wrap .txr.hold .txb{color:var(--warn);border-color:var(--warn);border-style:dashed}
 #wallet-wrap .txr.excluded{opacity:.6}
 #wallet-wrap .txr.excluded .txam{text-decoration:line-through}
 #plaid-items{padding:6px 10px 0;display:flex;flex-direction:column;gap:6px}
@@ -254,7 +255,7 @@ footer a{color:#8fb0ff}
     <tbody id="wallet-body"></tbody>
     <tfoot id="wallet-foot"></tfoot>
   </table>
-  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span><span><span class="live">●</span>saldo letto in tempo reale</span><span>mov.: movimenti aggiornati da Plaid</span></div>
+  <div class="hint" id="wallet-legend"><span><span class="tag p">P</span>Plaid: saldo dalla banca, pending inclusi</span><span><span class="tag w">W</span>Wallet</span><span><span class="tag m">M</span>inserito a mano</span><span><span class="live">●</span>saldo letto in tempo reale</span><span>mov.: movimenti aggiornati da Plaid</span><span>≈ include trattenute ricavate dal disponibile</span></div>
   <div class="row" id="wallet-actions"><button class="btn sec" type="button" id="wallet-refresh">Aggiorna ora</button><button class="btn sec" type="button" id="plaid-link">Collega banca</button><button class="btn sec" type="button" id="plaid-search">Cerca istituto</button><span class="hint" id="wallet-refresh-msg"></span></div>
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
@@ -2818,17 +2819,18 @@ function renderWallet() {
       name.append(a.name);
       name.title = a.name + (a.originalName ? ` (nome originale: ${a.originalName})` : '') + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
       const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
-      if (a.pending && a.pending.count) {
+      if (a.pending && (a.pending.count || a.pending.unlisted)) {
         const pd = a.pending;
         const p = document.createElement('span');
         p.className = 'pend';
-        p.textContent = `in sospeso ${fmtMoney(pd.amount, a.currency)}` + (pd.check === 'ok' ? ' ✓' : pd.check === 'differs' ? ' ?' : '');
+        p.textContent = `in sospeso ${fmtMoney(pd.amount, a.currency)}` + (pd.check === 'ok' ? ' ✓' : pd.check === 'differs' ? ' ?' : pd.check === 'inferred' ? ' ≈' : '');
         const why = {
           ok: 'Verificati con il saldo disponibile della banca.',
           differs: `Il valore della banca che dovrebbe includere i pending è ${fmtMoney(pd.bankImplied, a.currency)}, diverso da questo saldo: la banca può non includere i pending nel disponibile, oppure ci sono somme bloccate o pending non ancora nell'elenco di Plaid. I pending elencati restano conteggiati.`,
           unverified: 'La banca non fornisce il saldo disponibile: pending non verificabili.',
+          inferred: `Include ${fmtMoney(pd.unlisted, a.currency)} di trattenute che la banca conta nel credito disponibile ma Plaid non elenca come movimenti (ricavate da limite − disponibile).`,
         }[pd.check] || '';
-        bal.title = `Contabilizzato ${fmtMoney(a.postedBalance, a.currency)}, ${pd.count} movimenti in sospeso. ${why}`;
+        bal.title = `Contabilizzato ${fmtMoney(a.postedBalance, a.currency)}, ${pd.count} movimenti in sospeso elencati. ${why}`;
         bal.append(p);
       }
       tr.append(name, bal);
@@ -2959,12 +2961,13 @@ async function loadTx(id) {
   renderWallet();
 }
 
-const TX_LABEL = { pending: 'in sospeso', excluded: 'escluso', uncleared: 'non confermato' };
+const TX_LABEL = { pending: 'in sospeso', excluded: 'escluso', uncleared: 'non confermato', hold: 'dal disponibile' };
 const TX_HELP = {
   pending: 'In sospeso: aggiunto al saldo contabilizzato della banca.',
   excluded: 'Pending già sostituito dal movimento contabilizzato: non conteggiato, per non contarlo due volte.',
   posted: 'Contabilizzato: già compreso nel saldo della banca.',
   uncleared: 'Registrato in Wallet ma non ancora confermato dalla banca: conta nel saldo di Wallet.',
+  hold: 'Somma che la banca trattiene sul credito disponibile (limite − disponibile − debito) senza che Plaid elenchi il movimento: conteggiata come in sospeso.',
 };
 
 /** Detail row under an account: how the balance is made and its latest transactions. */
@@ -2990,13 +2993,15 @@ function txDetailRow(a) {
   const d = st.body;
   const cur = a.currency || d.currency;
   if (d.source === 'plaid') {
-    note(`Saldo = contabilizzato dalla banca ${fmtMoney(d.posted, cur)} + in sospeso ${fmtMoney(d.pending, cur)} = ${fmtMoney(d.balance, cur)}. `
-      + 'I movimenti contabilizzati sono già nel saldo della banca: si aggiungono solo quelli in sospeso.');
+    note(`Saldo = contabilizzato dalla banca ${fmtMoney(d.posted, cur)} + in sospeso ${fmtMoney(d.pending, cur)}`
+      + (d.unlisted ? ` (di cui trattenute non elencate ${fmtMoney(d.unlisted, cur)})` : '')
+      + ` = ${fmtMoney(d.balance, cur)}. I movimenti contabilizzati sono già nel saldo della banca: si aggiungono solo quelli in sospeso.`);
     if (d.asOf) note(`Movimenti degli ultimi ${d.windowDays} giorni, aggiornati da Plaid il ${new Date(d.asOf).toLocaleString('it-IT')}.`, 'muted');
   } else {
     note('Saldo calcolato da Wallet come somma di tutti i movimenti registrati: qui gli ultimi ' + (d.transactions || []).length + '.');
   }
-  const list = d.transactions || [];
+  const list = (d.unlisted ? [{ date: null, name: 'Trattenuta non elencata da Plaid', amount: d.unlisted, status: 'hold' }] : [])
+    .concat(d.transactions || []);
   if (!list.length) { note(d.transactions ? 'Nessun movimento nel periodo.' : 'Movimenti non ancora letti: aggiorna.', 'muted'); return tr; }
   const box = document.createElement('div');
   box.className = 'txl';

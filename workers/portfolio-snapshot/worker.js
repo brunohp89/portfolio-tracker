@@ -801,7 +801,17 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const current = Number(b.current ?? b.available ?? 0);
   const posted = isCredit ? -current : current; // credit: Plaid's current is the amount owed
   const out = pend ? pend.out : 0;
-  const computed = round2(posted - out);
+  // Holds the bank counts but Plaid does not list (seen on a card whose authorisation only shows in
+  // its available credit): for credit cards, what the bank holds = (limit - available) - posted debt.
+  // Whatever exceeds the listed pending items, even by a cent, is counted as pending too and reported
+  // apart (pending.unlisted), since it is inferred from the available credit, not from a transaction.
+  let unlisted = 0;
+  if (isCredit && b.limit != null && b.available != null && pendingKnown) {
+    const held = Number(b.limit) - Number(b.available) - Math.max(0, -posted);
+    const extra = round2(held - out);
+    if (extra >= 0.01) unlisted = extra;
+  }
+  const computed = round2(posted - out - unlisted);
   // Guard 2 (report only): compare with the bank's own figure that should include pending items
   // (credit: limit - available; depository: available). Balances alone cannot tell "the bank already
   // counts this pending" from "the bank's available figure ignores pending" (some card issuers do the
@@ -816,6 +826,7 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const balance = computed;
   let check = "unverified";
   if (implied != null && isFinite(implied)) check = Math.abs(implied - computed) < 0.005 ? "ok" : "differs";
+  if (unlisted) check = "inferred";
   const acc = {
     id: "plaid:" + a.account_id,
     name: [item.institutionName, a.official_name || a.name].filter(Boolean).join(" · "),
@@ -831,6 +842,7 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
       known: pendingKnown,
       amount: round2(balance - posted),
       listed: round2(-out),
+      unlisted: round2(-unlisted), // inferred from the available credit, not a listed transaction
       count: pend ? pend.count : 0,
       check,
       bankImplied: implied != null && isFinite(implied) ? round2(implied) : null,
@@ -1039,6 +1051,7 @@ async function accountTransactions(env, id) {
       balance: acc.balance,
       posted: acc.postedBalance,
       pending: acc.pending ? acc.pending.amount : 0,
+      unlisted: acc.pending ? acc.pending.unlisted || 0 : 0,
       windowDays: PLAID_PENDING_DAYS,
       transactions: acc.recent || null,
     };
