@@ -283,6 +283,13 @@ Balance rules:
   error is shown in the bank's status line and the call is not retried for 24 hours. Plaid answers the
   call only after the bank does (4 to 10 seconds observed, more for some banks); a slow answer is
   handled as above, never as an error.
+- **Unlisted holds (credit cards):** some cards count an authorisation in their available credit
+  without Plaid listing it as a pending transaction (seen on 2026-11-17: a 92 USD hold on a card in
+  credit). For credit cards the Worker computes what the bank holds, `(limit - available) - posted
+  debt`, and counts whatever exceeds the listed pending items, even by one cent, as pending too
+  (`pending.unlisted`, `check: "inferred"`, shown with ≈ and as a separate "dal disponibile" line in
+  the detail). Only done when the transactions were read. Risk: a bank that lowers the available
+  credit for other reasons (blocks, payments being processed) shows that amount as pending.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
   account name); Wallet's own limit as a last resort.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
