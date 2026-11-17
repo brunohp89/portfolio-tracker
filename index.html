@@ -3176,20 +3176,34 @@ el('wallet-refresh').onclick = async () => {
   await refreshWallet(true);
   btn.disabled = false; btn.textContent = 'Aggiorna ora';
   const after = wallet && wallet.data && wallet.data.dataChangedAt;
-  out.textContent = walletErr ? '' : after && after !== before
-    ? 'Saldi aggiornati.'
-    : 'Nessuna novità da Wallet: apri l\'app Wallet per far sincronizzare le banche, poi riprova.';
-  // Plaid fetches the transactions asynchronously after /transactions/refresh: read again shortly after.
-  const asked = !walletErr && ((wallet.data.plaid && wallet.data.plaid.items) || []).some((it) => it.txRefreshRequested);
-  if (asked) {
-    out.textContent += ` Chiesto a Plaid di riscaricare i movimenti: ricontrollo tra ${TX_RECHECK_MS / 1000} s.`;
+  if (walletErr) { out.textContent = ''; return; }
+  // What this press did, bank by bank: Plaid first (it is where new transactions come from).
+  const items = (wallet.data.plaid && wallet.data.plaid.items) || [];
+  const names = (list) => list.map((it) => it.institution || 'banca').join(', ');
+  const asked = items.filter((it) => it.txRefreshRequested);
+  const throttled = items.filter((it) => it.txRefreshThrottled);
+  const slow = items.filter((it) => it.liveLate);
+  const msg = [];
+  if (asked.length) msg.push(`Chiesto a Plaid di riscaricare i movimenti (${names(asked)}).`);
+  if (throttled.length) {
+    const at = Math.max(...throttled.map((it) => it.txRefreshAt || 0));
+    msg.push(`Movimenti già richiesti a Plaid alle ${new Date(at).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })} (${names(throttled)}): al massimo una volta ogni 5 minuti per banca.`);
+  }
+  if (slow.length) msg.push(`Saldo in tempo reale in arrivo in background (${names(slow)}).`);
+  if (items.length && !asked.length && !throttled.length) msg.push('Saldi Plaid riletti.');
+  msg.push(after && after !== before ? 'Wallet aggiornato.' : 'Wallet senza novità (si sincronizza quando apri la sua app).');
+  // Plaid fetches the transactions asynchronously after /transactions/refresh, and slow banks finish in
+  // the background: read again shortly after.
+  if (asked.length || slow.length) {
+    msg.push(`Ricontrollo tra ${TX_RECHECK_MS / 1000} s.`);
     clearTimeout(txRecheckTimer);
     txRecheckTimer = setTimeout(async () => {
       lastForced = Date.now();
       await refreshWallet(true);
-      if (!walletErr) out.textContent = 'Movimenti di Plaid ricontrollati.';
+      if (!walletErr) out.textContent = 'Plaid ricontrollato: movimenti e saldi in background inclusi.';
     }, TX_RECHECK_MS);
   }
+  out.textContent = msg.join(' ');
 };
 
 // ---------- private labels (e.g. the broker's real name), served by the Worker from its KV ----------

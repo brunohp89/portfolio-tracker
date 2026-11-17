@@ -272,6 +272,10 @@ Balance rules:
   `/transactions/get`, `/item/get` and `/accounts/get` get 12 seconds. Plaid and Yahoo run alongside
   Wallet, and the PWA waits up to 40 seconds for `/wallet`. Each bank's status carries `ms`, the
   duration of each call.
+- **Forced reads:** "Aggiorna ora" always reaches Plaid (until 2026-11-17 a forced read within a
+  minute of an automatic one was answered from cache and did nothing). The message under the button
+  says, per bank, whether the refresh was requested, already requested less than 5 minutes earlier
+  (`txRefreshThrottled`), or whether a real-time balance is still arriving in the background.
 - **On-demand transaction refresh:** a forced read ("Aggiorna ora") also calls
   `/transactions/refresh` for each bank, at most once every 5 minutes per Item (Plaid allows 2 per
   minute and 120 per hour). Plaid fetches asynchronously, so the PWA reads `/wallet?fresh=1` again
@@ -357,8 +361,8 @@ logins of the household). One more bank is read only through Wallet.
 | Crypto prices | real time (Coinbase WS) |
 | Stock and ETF prices | real time trades (Finnhub) + Yahoo poll every 30 s with the market open |
 | Bank balances in the PWA | on open, on foreground, every 10 min; "Aggiorna ora" forces it (max once a minute) |
-| Worker `/wallet` cache | 10 min (1 min floor for forced reads), per Worker isolate |
-| Plaid balances | real time at most every 5 min per bank (`/accounts/balance/get`), otherwise Plaid's latest refresh (`/accounts/get`); Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min (1 min when forced) |
+| Worker `/wallet` cache | 10 min, per Worker isolate; forced reads always rebuild it (the Wallet call itself keeps a 1 min floor: a Wallet read younger than that is reused) |
+| Plaid balances | real time at most every 5 min per bank (`/accounts/balance/get`), otherwise Plaid's latest refresh (`/accounts/get`); Plaid answers are cached for all Worker isolates in `PLAID_KV` (`plaid:summary`), so Plaid is called at most once per 10 min, plus each forced read |
 | Plaid pending list | Plaid's own transaction updates, typically a few times a day; "Aggiorna ora" asks for one now (`/transactions/refresh`, max once per 5 min per bank) |
 | Wallet (banks not linked through Plaid) | whenever Wallet syncs the bank; opening the Wallet app forces it; posted transactions only |
 

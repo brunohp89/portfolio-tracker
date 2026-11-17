@@ -402,9 +402,9 @@ const WALLET_LAST_KEY = "wallet:last";
  * Last successful Wallet read, so a Wallet outage does not hide the Plaid balances: memory first,
  * then PLAID_KV (survives new isolates). Written at most once per WALLET_TTL_MS.
  */
-let walletLast = { at: 0, accounts: null };
-async function saveWalletLast(env, accounts) {
-  walletLast = { at: Date.now(), accounts };
+let walletLast = { at: 0, accounts: null, meta: null };
+async function saveWalletLast(env, accounts, meta) {
+  walletLast = { at: Date.now(), accounts, meta };
   if (env.PLAID_KV) await env.PLAID_KV.put(WALLET_LAST_KEY, JSON.stringify(walletLast)).catch(() => {});
 }
 async function loadWalletLast(env) {
@@ -416,8 +416,9 @@ async function loadWalletLast(env) {
 
 async function walletSummary(env, force, ctx) {
   if (!env.WALLET_API_TOKEN) throw new HttpError(500, "wallet_not_configured", "set the WALLET_API_TOKEN secret");
-  const age = Date.now() - walletCache.at;
-  if (walletCache.body && age < (force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS)) return walletCache.body;
+  // A forced read ("Aggiorna ora") always rebuilds the answer, so Plaid's part (transactions refresh,
+  // new transactions) always runs; only the Wallet call keeps its WALLET_FORCE_MIN_MS floor (below).
+  if (walletCache.body && !force && Date.now() - walletCache.at < WALLET_TTL_MS) return walletCache.body;
   const plaidOn = plaidConfigured(env);
   const limits = creditLimitOverrides(env);
   // Plaid and FX run alongside Wallet: the slowest source sets the response time, not their sum.
@@ -425,15 +426,24 @@ async function walletSummary(env, force, ctx) {
   sidePromise.catch(() => {}); // awaited below; avoids an unhandled rejection on the early returns
 
   let all = null;
-  let headers = null;
+  let meta = null; // { dataChangedAt, syncInProgress } from Wallet's response headers
   let walletError = null;
-  if (Date.now() < walletBackoffUntil) {
+  const recent = force ? await loadWalletLast(env) : null;
+  if (recent && recent.accounts && recent.meta && Date.now() - recent.at < WALLET_FORCE_MIN_MS) {
+    // Read less than a minute ago: reuse it, Wallet's data cannot have moved much (300 requests/hour).
+    ({ accounts: all, meta } = recent);
+  } else if (Date.now() < walletBackoffUntil) {
     // Never call Wallet again while it asked us to wait.
     walletError = { code: "wallet_rate_limited", message: `retry after ${Math.ceil((walletBackoffUntil - Date.now()) / 1000)} s` };
   } else {
     try {
-      ({ accounts: all, headers } = await walletAccounts(env));
-      await saveWalletLast(env, all);
+      const read = await walletAccounts(env);
+      all = read.accounts;
+      meta = {
+        dataChangedAt: read.headers ? read.headers.get("X-Last-Data-Change-At") : null,
+        syncInProgress: read.headers ? read.headers.get("X-Sync-In-Progress") === "true" : null,
+      };
+      await saveWalletLast(env, all, meta);
     } catch (err) {
       walletError = { code: (err instanceof HttpError && err.code) || "wallet_error", message: String((err && err.message) || err) };
     }
@@ -474,8 +484,8 @@ async function walletSummary(env, force, ctx) {
   const body = {
     ok: true,
     generatedAt: new Date().toISOString(),
-    dataChangedAt: headers && headers.get("X-Last-Data-Change-At"),
-    syncInProgress: headers ? headers.get("X-Sync-In-Progress") === "true" : null,
+    dataChangedAt: meta && meta.dataChangedAt,
+    syncInProgress: meta ? meta.syncInProgress : null,
     pendingIncluded: accounts.some((a) => a.pending && a.pending.known),
     fx,
     plaid: { configured: plaid.configured, items: plaid.items, pendingDays: PLAID_PENDING_DAYS },
@@ -576,11 +586,14 @@ async function plaidExchange(env, input) {
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 /** Asks Plaid to fetch this bank's transactions now (asynchronous: new items show up on a later read). */
+/** Last refresh error worth showing: a TIMEOUT stored by an older version only meant "slow bank". */
+const refreshError = (prev) => (prev && prev.txRefreshError && prev.txRefreshError.code !== "TIMEOUT" ? prev.txRefreshError : null);
+
 async function plaidTxRefresh(env, item, prev, today) {
   const at = (prev && prev.txRefreshAt) || 0;
   const blockedUntil = (prev && prev.txRefreshBlockedUntil) || 0;
   if (today < blockedUntil || today - at < PLAID_TX_REFRESH_MIN_MS) {
-    return { at, blockedUntil, error: (prev && prev.txRefreshError) || null };
+    return { at, blockedUntil, error: refreshError(prev), throttled: true };
   }
   try {
     await plaidCall(env, "/transactions/refresh", { access_token: item.accessToken }, PLAID_BACKGROUND_MS);
@@ -698,7 +711,7 @@ function plaidBuild(item, p) {
   const lastSync = live ? new Date(liveAt).toISOString() : txUpdatedAt || new Date(today).toISOString();
   const rf = p.refreshLate
     ? { at: today, blockedUntil: 0, error: null, requested: true, unconfirmed: true }
-    : p.refresh || { at: (prev && prev.txRefreshAt) || 0, blockedUntil: (prev && prev.txRefreshBlockedUntil) || 0, error: (prev && prev.txRefreshError) || null };
+    : p.refresh || { at: (prev && prev.txRefreshAt) || 0, blockedUntil: (prev && prev.txRefreshBlockedUntil) || 0, error: refreshError(prev) };
   const status = {
     itemId: item.itemId,
     institution: item.institutionName,
@@ -712,6 +725,7 @@ function plaidBuild(item, p) {
     txRefreshAt: rf.at,
     txRefreshRequested: !!rf.requested,
     txRefreshUnconfirmed: !!rf.unconfirmed,
+    txRefreshThrottled: !!rf.throttled, // forced read, but this bank was asked less than 5 min ago
     txRefreshBlockedUntil: rf.blockedUntil,
     txRefreshError: rf.error,
     balanceLive: live,
@@ -897,10 +911,11 @@ async function plaidCacheMerge(env, results, full) {
 }
 
 async function plaidFresh(env, force, ctx) {
-  const maxAge = force ? WALLET_FORCE_MIN_MS : WALLET_TTL_MS;
-  if (plaidCache.items && Date.now() - plaidCache.at < maxAge) return plaidCache;
+  // Forced reads always ask Plaid: each call has its own limit (real time once per 5 min, refresh once
+  // per 5 min per bank) and the app allows one forced read a minute per device.
+  if (!force && plaidCache.items && Date.now() - plaidCache.at < WALLET_TTL_MS) return plaidCache;
   const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
-  if (shared && shared.items && Date.now() - shared.at < maxAge) return (plaidCache = shared);
+  if (!force && shared && shared.items && Date.now() - shared.at < WALLET_TTL_MS) return (plaidCache = shared);
   // The previous answer carries, per Item, the last real-time read, any block and the refresh state.
   const prev = newestItems([plaidCache, shared]);
   const results = await Promise.all((await plaidItems(env)).map((item) => {
