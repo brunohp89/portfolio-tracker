@@ -276,7 +276,7 @@ footer a{color:#8fb0ff}
     <select id="extra-cur" aria-label="Valuta"><option>USD</option><option>EUR</option></select>
     <button class="btn sec" type="submit">Aggiungi</button>
   </form>
-  <div class="hint" id="extra-hint">Salvati solo in questo browser: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.</div>
+  <div class="hint" id="extra-hint">Condivisi tra tutti i dispositivi: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.</div>
 </details>
 
 <details class="tablewrap" id="closed-wrap" open>
@@ -2624,7 +2624,7 @@ return {
 /* Loader: connection settings, snapshot download and cache, then starts the tracker. */
 (() => {
 'use strict';
-const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra', extras: 'pt.extras', labels: 'pt.labels' };
+const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra', extras: 'pt.extras', extrasSynced: 'pt.extrasSynced', labels: 'pt.labels' };
 const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
 const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 const el = (id) => document.getElementById(id);
@@ -2813,7 +2813,8 @@ function cell(text, cls) {
   return td;
 }
 
-/** Manual accounts kept only in this browser: [{ id, name, amount, currency }]. */
+/** Manual accounts [{ id, name, amount, currency }]: kept by the Worker (PLAID_KV "manual") so every
+ * device shares them; this browser keeps a copy (pt.extras) to start without network. */
 const validExtra = (x) => !!x && typeof x.amount === 'number' && isFinite(x.amount) && (x.currency === 'USD' || x.currency === 'EUR');
 const newExtraId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 let extras = (() => {
@@ -2827,6 +2828,42 @@ function saveExtras() {
   try { localStorage.removeItem(LS.extra); } catch { /* storage unavailable */ }
 }
 if (read(LS.extra)) saveExtras(); // finish the migration once
+
+/** Reads only the shared manual accounts (a KV read, no bank call): used when the balances are recent
+ * enough to skip /wallet, so a change made on another device still shows at once. */
+async function syncManual() {
+  if (!conn) return;
+  try {
+    const res = await fetch(conn.url + '/accounts/manual', { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' });
+    const out = await res.json().catch(() => null);
+    if (!res.ok || !out || !out.ok || !Array.isArray(out.accounts)) return;
+    const before = JSON.stringify(extras);
+    await adoptServerManual(out.accounts);
+    if (JSON.stringify(extras) !== before) renderWallet();
+  } catch { /* offline: keep the local copy */ }
+}
+/** Sends one change to the Worker and adopts the list it answers with (the shared one). */
+async function manualOp(body) {
+  const r = await workerPost('/accounts/manual', body);
+  extras = r.accounts.filter(validExtra);
+  saveExtras();
+  return r;
+}
+/**
+ * Adopts the shared list from /wallet. The first time (per browser), accounts that only exist in this
+ * browser (created before the sync existed) are uploaded first, so nothing is lost.
+ */
+async function adoptServerManual(list) {
+  if (!read(LS.extrasSynced)) {
+    const missing = extras.filter((x) => !list.some((s) => s.id === x.id));
+    try {
+      for (const x of missing) list = (await workerPost('/accounts/manual', { op: 'upsert', account: x })).accounts;
+      write(LS.extrasSynced, true);
+    } catch { return; } // keep the local list; retried at the next refresh
+  }
+  extras = list.filter(validExtra);
+  saveExtras();
+}
 /** Manual accounts as rows of the Conti table. */
 const extraRows = () => extras.map((x) => ({
   id: 'local:' + x.id, localId: x.id, name: x.name, type: 'Manual', currency: x.currency, bankSync: false,
@@ -2869,7 +2906,7 @@ function parseAmount(text) {
   return t;
 }
 
-const EXTRA_HINT = 'Salvati solo in questo browser: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.';
+const EXTRA_HINT = 'Condivisi tra tutti i dispositivi: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.';
 /** Amount typed in a field: a number rounded to cents, or null (empty or invalid). */
 function readAmount(input) {
   const raw = parseAmount(input.value);
@@ -2881,28 +2918,37 @@ const flipSign = (input) => {
   const v = input.value.trim();
   input.value = /^[-−–]/.test(v) ? v.replace(/^[-−–]\s*/, '') : '-' + v;
 };
-el('extra-form').addEventListener('submit', (ev) => {
+el('extra-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const amount = readAmount(el('extra-amount'));
   if (amount == null) { el('extra-hint').textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; return; }
   const name = el('extra-name').value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale';
-  extras.push({ id: newExtraId(), name, amount, currency: el('extra-cur').value });
-  saveExtras();
-  el('extra-name').value = ''; el('extra-amount').value = '';
-  el('extra-hint').textContent = `Aggiunto "${name}". ` + EXTRA_HINT;
+  const btn = el('extra-form').querySelector('button[type=submit]');
+  btn.disabled = true;
+  el('extra-hint').textContent = 'Salvo…';
+  try {
+    await manualOp({ op: 'upsert', account: { id: newExtraId(), name, amount, currency: el('extra-cur').value } });
+    el('extra-name').value = ''; el('extra-amount').value = '';
+    el('extra-hint').textContent = `Aggiunto "${name}", visibile su tutti i dispositivi. ` + EXTRA_HINT;
+  } catch (e) {
+    el('extra-hint').textContent = 'Non salvato: ' + e.message;
+  } finally { btn.disabled = false; }
   renderWallet();
 });
 el('extra-sign').onclick = () => flipSign(el('extra-amount'));
 
 /** Manual account being edited in place (its id), if any. */
 let extraEditing = null;
-function deleteExtra(id) {
+async function deleteExtra(id) {
   const x = extras.find((e) => e.id === id);
-  if (!x || !confirm(`Eliminare il conto manuale "${x.name}" (${fmtMoney(x.amount, x.currency)})?`)) return;
-  extras = extras.filter((e) => e.id !== id);
-  if (extraEditing === id) extraEditing = null;
-  saveExtras();
-  el('extra-hint').textContent = `Eliminato "${x.name}".`;
+  if (!x || !confirm(`Eliminare il conto manuale "${x.name}" (${fmtMoney(x.amount, x.currency)}) da tutti i dispositivi?`)) return;
+  try {
+    await manualOp({ op: 'delete', id });
+    if (extraEditing === id) extraEditing = null;
+    el('extra-hint').textContent = `Eliminato "${x.name}".`;
+  } catch (e) {
+    el('extra-hint').textContent = 'Non eliminato: ' + e.message;
+  }
   renderWallet();
 }
 /** Row under a manual account to change its name, amount and currency. */
@@ -2930,14 +2976,20 @@ function extraEditorRow(id) {
   sign.onclick = () => flipSign(amount);
   cancel.onclick = () => { extraEditing = null; renderWallet(); };
   del.onclick = () => deleteExtra(id);
-  form.onsubmit = (ev) => {
+  form.onsubmit = async (ev) => {
     ev.preventDefault();
     const v = readAmount(amount);
     if (v == null) { msg.textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; msg.classList.add('down'); return; }
-    Object.assign(x, { name: name.value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale', amount: v, currency: cur.value });
+    const next = { ...x, name: name.value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale', amount: v, currency: cur.value };
+    save.disabled = true; msg.classList.remove('down'); msg.textContent = 'Salvo…';
+    try {
+      await manualOp({ op: 'upsert', account: next });
+    } catch (e) {
+      save.disabled = false; msg.classList.add('down'); msg.textContent = 'Non salvato: ' + e.message;
+      return;
+    }
     extraEditing = null;
-    saveExtras();
-    el('extra-hint').textContent = `Aggiornato "${x.name}".`;
+    el('extra-hint').textContent = `Aggiornato "${next.name}".`;
     renderWallet();
   };
   form.append(name, sign, amount, cur, save, cancel, del);
@@ -3029,7 +3081,7 @@ function renderWallet() {
         name.append(al);
       }
       name.append(a.name);
-      name.title = a.name + (a.originalName ? ` (nome originale: ${a.originalName})` : '') + (a.local ? ' (manuale, solo in questo browser)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
+      name.title = a.name + (a.originalName ? ` (nome originale: ${a.originalName})` : '') + (a.local ? ' (conto manuale, condiviso tra i dispositivi)' : a.source === 'plaid' ? ' (dalla banca via Plaid)' : a.bankSync ? ' (via Wallet)' : ' (inserito a mano in Wallet)');
       const bal = cell(fmtMoney(a.balance, a.currency), 'num' + (a.balance < 0 ? ' down' : ''));
       if (a.pending && (a.pending.count || a.pending.unlisted)) {
         const pd = a.pending;
@@ -3129,7 +3181,7 @@ function renderWallet() {
  */
 async function refreshWallet(force) {
   if (!conn || walletBusy) return;
-  if (!force && wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); return; }
+  if (!force && wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); syncManual(); return; }
   walletBusy = true;
   const ctrl = new AbortController();
   // The Worker bounds every Plaid call (live balance 8 s, others 12 s); Wallet runs alongside.
@@ -3144,6 +3196,7 @@ async function refreshWallet(force) {
     wallet = { data: body, fetchedAt: Date.now() };
     walletErr = '';
     write(LS.wallet, wallet);
+    if (Array.isArray(body.manual)) await adoptServerManual(body.manual);
     for (const id of txOpen) loadTx(id); // open details follow the new balances
   } catch (err) {
     walletErr = walletErrorText(err);
@@ -3372,7 +3425,10 @@ async function renameAccount(a) {
   const name = input.replace(/\s+/g, ' ').trim().slice(0, 60);
   if (a.local) {
     const x = extras.find((e) => e.id === a.localId);
-    if (x) { x.name = name || 'Conto manuale'; saveExtras(); renderWallet(); }
+    if (x) {
+      try { await manualOp({ op: 'upsert', account: { ...x, name: name || 'Conto manuale' } }); } catch (e) { plaidMsg('Rinomina non riuscita: ' + e.message, true); }
+      renderWallet();
+    }
     return;
   }
   try {

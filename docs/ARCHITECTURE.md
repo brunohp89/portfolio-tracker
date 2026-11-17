@@ -365,13 +365,18 @@ institution list with the products each institution supports; it links nothing a
 Linked as of 2026-11-16: 5 of the 10 Trial Items (banks A, B, C and D, one of them through two separate
 logins of the household). One more bank is read only through Wallet.
 
-### 4.5 Local-only features
+### 4.5 Manual accounts and settings
 
 - **Manual accounts** under the Conti table: any number of them (name, amount, USD/EUR, a "±" button
   for debts), added with the form below the table. In the table, ✎ or a tap on the row opens an
   editor for name, amount and currency, ✕ (in the empty sync column) deletes the account after a
-  confirmation. Stored in `localStorage` (`pt.extras`, a list; the single `pt.extra` of earlier
-  versions is migrated once), counted in the totals and in the net worth, only in that browser.
+  confirmation. Shared by every device: the Worker keeps them in `PLAID_KV` (`manual`), changes go
+  through `POST /accounts/manual` (`upsert` or `delete` of one account, answered with the whole list),
+  `/wallet` returns the list as `manual`, and `GET /accounts/manual` reads it alone when the app opens
+  with balances recent enough to skip `/wallet`. Each browser keeps a copy (`pt.extras`) to start
+  without network; the first time a browser syncs, accounts that existed only there (from the
+  local-only versions, `pt.extras` or the older single `pt.extra`) are uploaded, then `pt.extrasSynced`
+  is set. Counted in the totals and in the net worth.
 - **Settings modal:** time zone, Yahoo proxy URL and token, Finnhub key, poll interval, snapshot import/export.
 
 ## 5. Refresh cadence
@@ -404,7 +409,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 | `PLAID_SECRET` | secret | Plaid Production secret |
 | `PLAID_ENV` | text, optional | `production` (default) or `sandbox` |
 | `PLAID_COUNTRY_CODES` | text | comma-separated Plaid country codes for Link and the institution search (kept out of the code) |
-| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `labels` (private display labels), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
+| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `manual` (manual accounts), `labels` (private display labels), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
 
 Elsewhere:
 

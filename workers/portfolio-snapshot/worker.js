@@ -37,6 +37,10 @@
  *   POST /plaid/exchange     {publicToken, institutionName?} -> stores the bank's access token
  *   POST /accounts/rename    {id, name} -> custom display name for an account, kept in PLAID_KV
  *                            ("names") so every device shows it; an empty name restores the original
+ *   POST /accounts/manual    {op: "upsert", account: {id, name, amount, currency}} or {op: "delete", id}
+ *                            -> the full list of manual accounts, kept in PLAID_KV ("manual") so every
+ *                            device shares them; /wallet returns the list as "manual"
+ *   GET  /accounts/manual    the list alone (a KV read), for apps whose balances are still fresh
  *   GET  /labels             private display labels kept in PLAID_KV ("labels"), e.g. the broker's
  *                            name and the snapshot's field name for it, so the public code uses
  *                            placeholders only
@@ -74,6 +78,10 @@ export default {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
       const url = new URL(request.url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
+      if (request.method === "POST" && path === "/accounts/manual") {
+        await requireToken(request, env);
+        return json(await manualAccountsOp(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
+      }
       if (request.method === "POST" && path === "/accounts/rename") {
         await requireToken(request, env);
         return json(await renameAccount(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
@@ -86,10 +94,16 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (!["/check", "/wallet", "/labels", "/plaid/institutions", "/accounts/transactions"].includes(path) && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (!["/check", "/wallet", "/labels", "/plaid/institutions", "/accounts/transactions", "/accounts/manual"].includes(path) && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
-      if (path === "/wallet") return json(await walletSummary(env, url.searchParams.get("fresh") === "1", ctx), 200, cors);
+      if (path === "/wallet") {
+        // Manual accounts are read on every call (not cached with the summary), so a change made on
+        // one device shows on the others at their next read.
+        const [summary, manual] = await Promise.all([walletSummary(env, url.searchParams.get("fresh") === "1", ctx), loadManual(env)]);
+        return json({ ...summary, manual }, 200, cors);
+      }
+      if (path === "/accounts/manual") return json({ ok: true, accounts: (await loadManual(env)) || [] }, 200, cors);
       if (path === "/accounts/transactions") return json(await accountTransactions(env, url.searchParams.get("id")), 200, cors);
       if (path === "/labels") {
         const labels = env.PLAID_KV ? await env.PLAID_KV.get("labels", "json").catch(() => null) : null;
@@ -1020,6 +1034,50 @@ async function renameAccount(env, input) {
   await env.PLAID_KV.put(NAMES_KEY, JSON.stringify(names));
   walletCache = { at: 0, body: null };
   return { ok: true, id, name: name || null };
+}
+
+// ---------- manual accounts (entered in the app, shared by every device) ----------
+
+const MANUAL_KEY = "manual";
+const MANUAL_MAX = 100;
+
+async function loadManual(env) {
+  if (!env.PLAID_KV) return null;
+  const list = await env.PLAID_KV.get(MANUAL_KEY, "json").catch(() => null);
+  return Array.isArray(list) ? list : [];
+}
+
+/** A valid manual account, or an HttpError: { id, name, amount, currency }. */
+function cleanManual(x) {
+  const a = x && typeof x === "object" ? x : {};
+  const id = typeof a.id === "string" ? a.id.trim() : "";
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(id)) throw new HttpError(400, "bad_request", "manual account id missing or invalid");
+  const amount = Number(a.amount);
+  if (!isFinite(amount) || Math.abs(amount) >= 1e12) throw new HttpError(400, "bad_request", "amount must be a number");
+  if (a.currency !== "USD" && a.currency !== "EUR") throw new HttpError(400, "bad_request", "currency must be USD or EUR");
+  const name = typeof a.name === "string" ? a.name.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+  return { id, name: name || "Conto manuale", amount: round2(amount), currency: a.currency };
+}
+
+/** Adds or replaces (upsert) or removes (delete) one manual account; answers with the whole list. */
+async function manualAccountsOp(env, input) {
+  if (!env.PLAID_KV) throw new HttpError(500, "manual_not_configured", "the PLAID_KV binding is needed to store manual accounts");
+  const list = await loadManual(env);
+  if (input.op === "upsert") {
+    const acc = cleanManual(input.account);
+    const i = list.findIndex((x) => x.id === acc.id);
+    if (i >= 0) list[i] = acc;
+    else if (list.length >= MANUAL_MAX) throw new HttpError(400, "too_many", `at most ${MANUAL_MAX} manual accounts`);
+    else list.push(acc);
+  } else if (input.op === "delete") {
+    const id = typeof input.id === "string" ? input.id : "";
+    const i = list.findIndex((x) => x.id === id);
+    if (i >= 0) list.splice(i, 1);
+  } else {
+    throw new HttpError(400, "bad_request", 'op must be "upsert" or "delete"');
+  }
+  await env.PLAID_KV.put(MANUAL_KEY, JSON.stringify(list));
+  return { ok: true, accounts: list };
 }
 
 // ---------- latest transactions of one account (detail view) ----------
