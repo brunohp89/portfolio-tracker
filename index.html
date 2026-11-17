@@ -2062,10 +2062,10 @@ const COLS = [
   { k: 'qty', l: 'Qtà' },
   { k: 'price', l: 'Prezzo' },
   { k: 'dayPct', l: 'Giorno' },
-  { k: 'value', l: 'Valore' },
-  { k: 'weight', l: 'Peso' },
   { k: 'pnl', l: 'P&L aperto' },
   { k: 'pnlPct', l: '%' },
+  { k: 'value', l: 'Valore' },
+  { k: 'weight', l: 'Peso' },
   { k: 'src', l: 'Fonte', cls: 'l' },
 ];
 function rowData(p, scopeTotal) {
@@ -2106,17 +2106,17 @@ function renderTable() {
       <td class="num">${fmtQty(r.qty)}</td>
       <td class="num" data-price="${r.symbol}">${r.price == null ? '—' : fmtPrice(r.price)}</td>
       <td class="num ${cls(r.dayPct)}" title="${r.dayUsd == null ? '' : fmtSigned(r.dayUsd, 2)}">${r.dayPct == null ? '—' : fmtPct(r.dayPct)}</td>
-      <td class="num">${fmtUsd(r.value)}</td>
-      <td class="num">${r.weight == null ? '—' : (r.weight * 100).toFixed(1) + '%'}</td>
       <td class="num ${cls(r.pnl)}">${fmtSigned(r.pnl)}</td>
       <td class="num ${cls(r.pnlPct)}">${r.pnlPct == null ? '—' : fmtPct(r.pnlPct, 1)}</td>
+      <td class="num">${fmtUsd(r.value)}</td>
+      <td class="num">${r.weight == null ? '—' : (r.weight * 100).toFixed(1) + '%'}</td>
       <td class="l"><span class="src ${r.src}">${srcLbl}</span></td></tr>`;
   }).join('');
   const tv = rows.filter((r) => !showAll || state.custom.has(r.symbol));
   const sum = (f) => tv.reduce((s, r) => s + (r[f] || 0), 0);
   $('tfoot').innerHTML = `<tr><td></td><td class="l"><b>Totale</b></td><td class="nm"></td><td></td><td></td>
-    <td class="num ${cls(sum('dayUsd'))}">${fmtSigned(sum('dayUsd'))}</td><td class="num"><b>${fmtUsd(sum('value'))}</b></td><td></td>
-    <td class="num ${cls(sum('pnl'))}">${fmtSigned(sum('pnl'))}</td><td></td><td></td></tr>`;
+    <td class="num ${cls(sum('dayUsd'))}">${fmtSigned(sum('dayUsd'))}</td><td class="num ${cls(sum('pnl'))}">${fmtSigned(sum('pnl'))}</td><td></td>
+    <td class="num"><b>${fmtUsd(sum('value'))}</b></td><td></td><td></td></tr>`;
 }
 /** Cheap in-place refresh of prices for the symbols that ticked, with a flash. */
 function flashPrices(syms) {
