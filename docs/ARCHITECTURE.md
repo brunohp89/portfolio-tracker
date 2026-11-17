@@ -10,7 +10,7 @@ PWA, the two Cloudflare Workers and the external data sources fit together. It l
 |---|---|---|---|
 | **Portfolio Brief** | Daily analysis of the brokerage account plus BTC and ETH wallets: valuation, P&L, XIRR/TWR, VaR, projections, PDF/XLSX | Claude scheduled task "Daily portfolio brief", every day at 00:00 America/New_York (fires a few minutes later) | Claude plugin `portfolio-brief` v0.9.1, skill `daily-brief`, Python engine in `skills/daily-brief/scripts/engine` |
 | **Brief artifact** | The published Portfolio Brief dashboard on claude.ai; also stores the ledger cache (`ledger_cache_v2.wasm`, xz JSON) | claude.ai | written by the brief |
-| **Portfolio Tracker** | Live PWA: positions at real-time prices, charts, returns, bank accounts and net worth | GitHub Pages (static, holds no data) | this repo: `index.html`, `sw.js`, `manifest.json` |
+| **Portfolio Tracker** | Live PWA: positions at real-time prices, charts, returns, bank accounts and net worth | GitHub Pages (static, holds no data) | this repo: `index.html` (markup, styles, CSP, a hashed loader script), `tracker.js` (positions, charts, returns), `loader.js` (connection, snapshot, bank accounts, Plaid), `sw.js`, `manifest.json` |
 | **Portfolio Brief app** | Static page that shows the latest `portfolio_brief.html` | GitHub Pages, separate repository (not covered in detail here) | separate repo |
 | **Worker `portfolio-snapshot`** | Authenticated backend of both apps: Drive files, bank balances (Wallet + Plaid), Plaid linking | Cloudflare Workers (free plan) | `workers/portfolio-snapshot/worker.js` |
 | **Worker `yahoo-proxy`** | CORS proxy for Yahoo Finance `/v8/finance/chart` and `/v8/finance/spark` only | Cloudflare Workers | source embedded in `index.html` (`#worker-src`) |
@@ -213,7 +213,7 @@ sequenceDiagram
   P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
 ```
 
-**Private labels:** the public code holds placeholders only. `index.html` uses `BROKER` (display
+**Private labels:** the public code holds placeholders only. `tracker.js` uses `BROKER` (display
 name of the brokerage and the `account` value of its positions in the snapshot) and `BK` (the
 snapshot's field name for its series and flows: `history[BK]`, `history['flow_' + BK]`,
 `flows[BK]`); the broker view's internal key is `broker`. The real values come from `GET /labels`
@@ -431,6 +431,20 @@ Elsewhere:
   sees them.
 - Wallet fair use: after a 429 the Worker stops calling Wallet for the `Retry-After` time (at least
   60 s) and serves the last answer; forced reads are limited to one a minute on both sides.
+- **XSS:** every string from outside the page (snapshot symbols, names and dates, Worker labels and
+  account names, Yahoo error messages, imported files) is data, never markup. `tracker.js` passes it
+  through `esc()` in every HTML template; `loader.js` builds its DOM with `textContent` only; messages
+  use `textContent`. Keep this rule for new code: the Worker `TOKEN` sits in `localStorage` (`pt.conn`),
+  so script injected into the page could read it.
+- **Content-Security-Policy** (meta tag in `index.html`), the second line of defence: only the small
+  loader script at the end of `index.html` may run, allowed by its SHA-256 hash, and `'strict-dynamic'`
+  extends that trust to the scripts it adds (`lightweight-charts.js`, `tracker.js`, `loader.js`) and to
+  the ones they load (Plaid Link, the XLSX reader from cdnjs). Inline event handlers and `javascript:`
+  URLs injected through data are blocked. Plaid also needs `frame-src` and `img-src` on
+  `cdn.plaid.com`; the service worker needs `worker-src 'self'`. Editing `tracker.js` or `loader.js`
+  needs no CSP change; editing the inline loader script means recomputing its hash
+  (`printf %s "<script body>" | openssl dgst -sha256 -binary | base64`, body = everything between
+  `<script>` and `</script>`), otherwise the page stays blank.
 
 ## 8. Limits and known behaviour
 
@@ -468,7 +482,8 @@ Elsewhere:
   `keep_bindings: ["plain_text", "secret_text", "kv_namespace"]` so existing secrets survive), or paste
   the file into the Cloudflare dashboard editor. Keep the repo copy and the deployed copy identical.
 - **Deploying the PWA:** push to `main`; GitHub Pages rebuilds in about 40 s. Reopen the app (the
-  service worker serves the new shell on the next network-first load).
+  service worker serves the new shell on the next network-first load). Adding a file to the app shell
+  means listing it in `SHELL` in `sw.js` and bumping `CACHE`.
 - **Linking banks:** one bank at a time, once each; check coverage first with "Cerca istituto".
 - **Checking a Plaid bank after linking:** compare the balance and the "in sospeso" line with the bank
   app; a check mark means the bank's available figure confirms the pending amount.
