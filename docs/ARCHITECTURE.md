@@ -367,8 +367,11 @@ logins of the household). One more bank is read only through Wallet.
 
 ### 4.5 Local-only features
 
-- **Manual account** under the Conti table (name, amount, USD/EUR, a "±" button for debts): stored in
-  `localStorage` (`pt.extra`), counted in the totals and in the net worth, only in that browser.
+- **Manual accounts** under the Conti table: any number of them (name, amount, USD/EUR, a "±" button
+  for debts), added with the form below the table. In the table, ✎ or a tap on the row opens an
+  editor for name, amount and currency, ✕ (in the empty sync column) deletes the account after a
+  confirmation. Stored in `localStorage` (`pt.extras`, a list; the single `pt.extra` of earlier
+  versions is migrated once), counted in the totals and in the net worth, only in that browser.
 - **Settings modal:** time zone, Yahoo proxy URL and token, Finnhub key, poll interval, snapshot import/export.
 
 ## 5. Refresh cadence

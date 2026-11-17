@@ -173,6 +173,13 @@ footer a{color:#8fb0ff}
 #extra-name{flex:1 1 100%;min-width:0}#extra-amount{width:120px;font-family:var(--mono)}
 #extra-sign{padding:6px 12px;font-family:var(--mono);font-size:15px}
 #extra-hint{padding:4px 10px 0}
+#wallet-wrap .xdel{background:none;border:0;padding:2px 4px;color:var(--muted);cursor:pointer;font-size:13px}
+#wallet-wrap .xdel:hover{color:var(--down)}
+#wallet-wrap .xed{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0}
+#wallet-wrap .xed input,#wallet-wrap .xed select{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 8px;font:inherit;font-size:13px}
+#wallet-wrap .xed input:first-child{flex:1 1 100%;min-width:0}
+#wallet-wrap .xed input[inputmode]{width:110px;font-family:var(--mono)}
+#wallet-wrap .xed .bad{color:var(--down)}
 @media (max-width:700px){#wallet-wrap table{font-size:12px}#wallet-wrap td.l{max-width:118px}#wallet-wrap .tag{margin-right:4px}#wallet-wrap .ren{padding-right:3px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}#wallet-wrap td,#wallet-wrap th{padding-left:6px;padding-right:6px}#wallet-wrap th .lg{display:none}#wallet-wrap th .sm{display:inline}}
 </style>
 </head>
@@ -263,14 +270,13 @@ footer a{color:#8fb0ff}
   <div class="hint" id="plaid-items"></div>
   <div class="hint" id="wallet-info"></div>
   <form class="row" id="extra-form" autocomplete="off">
-    <input id="extra-name" maxlength="40" placeholder="Conto manuale (es. Contanti a casa)" aria-label="Nome del conto manuale">
+    <input id="extra-name" maxlength="40" placeholder="Nuovo conto manuale (es. Contanti a casa)" aria-label="Nome del nuovo conto manuale">
     <button class="btn sec" type="button" id="extra-sign" title="Cambia segno (per un debito)" aria-label="Cambia segno">±</button>
     <input id="extra-amount" type="text" inputmode="decimal" placeholder="Importo" aria-label="Importo">
     <select id="extra-cur" aria-label="Valuta"><option>USD</option><option>EUR</option></select>
-    <button class="btn sec" type="submit">Salva</button>
-    <button class="btn sec" type="button" id="extra-clear">Rimuovi</button>
+    <button class="btn sec" type="submit">Aggiungi</button>
   </form>
-  <div class="hint" id="extra-hint">Salvato solo in questo browser: entra nei totali dei conti e nel patrimonio totale.</div>
+  <div class="hint" id="extra-hint">Salvati solo in questo browser: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.</div>
 </details>
 
 <details class="tablewrap" id="closed-wrap" open>
@@ -2618,7 +2624,7 @@ return {
 /* Loader: connection settings, snapshot download and cache, then starts the tracker. */
 (() => {
 'use strict';
-const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra', labels: 'pt.labels' };
+const LS = { conn: 'pt.conn', remote: 'pt.remote', wallet: 'pt.wallet', extra: 'pt.extra', extras: 'pt.extras', labels: 'pt.labels' };
 const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
 const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 const el = (id) => document.getElementById(id);
@@ -2807,22 +2813,37 @@ function cell(text, cls) {
   return td;
 }
 
-/** Manual account kept only in this browser: { name, amount, currency }. */
-let extra = read(LS.extra);
+/** Manual accounts kept only in this browser: [{ id, name, amount, currency }]. */
 const validExtra = (x) => !!x && typeof x.amount === 'number' && isFinite(x.amount) && (x.currency === 'USD' || x.currency === 'EUR');
-if (!validExtra(extra)) extra = null;
+const newExtraId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+let extras = (() => {
+  const list = read(LS.extras);
+  if (Array.isArray(list)) return list.filter(validExtra).map((x) => ({ ...x, id: String(x.id || newExtraId()) }));
+  const single = read(LS.extra); // the single manual account of earlier versions
+  return validExtra(single) ? [{ id: newExtraId(), name: single.name || 'Conto manuale', amount: single.amount, currency: single.currency }] : [];
+})();
+function saveExtras() {
+  write(LS.extras, extras);
+  try { localStorage.removeItem(LS.extra); } catch { /* storage unavailable */ }
+}
+if (read(LS.extra)) saveExtras(); // finish the migration once
+/** Manual accounts as rows of the Conti table. */
+const extraRows = () => extras.map((x) => ({
+  id: 'local:' + x.id, localId: x.id, name: x.name, type: 'Manual', currency: x.currency, bankSync: false,
+  balance: x.amount, lastRecordDate: null, credit: null, local: true,
+}));
 const round2 = (n) => Math.round(n * 100) / 100;
 
-/** Worker totals plus the manual account (converted at Wallet's EURUSD rate). */
+/** Worker totals plus the manual accounts (converted at the Worker's EURUSD rate). */
 function accountTotals(d) {
   const t = d.totals || {};
   const byCurrency = { ...(t.byCurrency || {}) };
   let usd = isFinite(t.usd) ? t.usd : null, eur = isFinite(t.eur) ? t.eur : null;
-  if (extra) {
-    byCurrency[extra.currency] = round2((byCurrency[extra.currency] || 0) + extra.amount);
-    const rate = d.fx && d.fx.rate;
+  const rate = d.fx && d.fx.rate;
+  for (const x of extras) {
+    byCurrency[x.currency] = round2((byCurrency[x.currency] || 0) + x.amount);
     if (usd != null && rate) {
-      usd = round2(usd + (extra.currency === 'USD' ? extra.amount : extra.amount * rate));
+      usd = round2(usd + (x.currency === 'USD' ? x.amount : x.amount * rate));
       eur = round2(usd / rate);
     }
   }
@@ -2848,31 +2869,87 @@ function parseAmount(text) {
   return t;
 }
 
-function fillExtraForm() {
-  el('extra-name').value = extra ? extra.name : '';
-  el('extra-amount').value = extra ? String(extra.amount) : '';
-  el('extra-cur').value = extra ? extra.currency : 'USD';
+const EXTRA_HINT = 'Salvati solo in questo browser: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.';
+/** Amount typed in a field: a number rounded to cents, or null (empty or invalid). */
+function readAmount(input) {
+  const raw = parseAmount(input.value);
+  const amount = raw ? Number(raw) : NaN;
+  return isFinite(amount) ? round2(amount) : null;
 }
-el('extra-form').addEventListener('submit', (ev) => {
-  ev.preventDefault();
-  const raw = parseAmount(el('extra-amount').value);
-  if (!raw) { extra = null; } else {
-    const amount = Number(raw);
-    if (!isFinite(amount)) { el('extra-hint').textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; return; }
-    extra = { name: el('extra-name').value.trim() || 'Conto manuale', amount: round2(amount), currency: el('extra-cur').value };
-  }
-  if (extra) write(LS.extra, extra); else { try { localStorage.removeItem(LS.extra); } catch { /* storage unavailable */ } }
-  el('extra-hint').textContent = extra ? 'Salvato in questo browser.' : 'Conto manuale rimosso.';
-  fillExtraForm(); renderWallet();
-});
 // Phone decimal keypads have no minus key: this button flips the sign of the amount.
-el('extra-sign').onclick = () => {
-  const input = el('extra-amount');
+const flipSign = (input) => {
   const v = input.value.trim();
   input.value = /^[-−–]/.test(v) ? v.replace(/^[-−–]\s*/, '') : '-' + v;
 };
-el('extra-clear').onclick = () => { el('extra-amount').value = ''; el('extra-form').requestSubmit(); };
-fillExtraForm();
+el('extra-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const amount = readAmount(el('extra-amount'));
+  if (amount == null) { el('extra-hint').textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; return; }
+  const name = el('extra-name').value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale';
+  extras.push({ id: newExtraId(), name, amount, currency: el('extra-cur').value });
+  saveExtras();
+  el('extra-name').value = ''; el('extra-amount').value = '';
+  el('extra-hint').textContent = `Aggiunto "${name}". ` + EXTRA_HINT;
+  renderWallet();
+});
+el('extra-sign').onclick = () => flipSign(el('extra-amount'));
+
+/** Manual account being edited in place (its id), if any. */
+let extraEditing = null;
+function deleteExtra(id) {
+  const x = extras.find((e) => e.id === id);
+  if (!x || !confirm(`Eliminare il conto manuale "${x.name}" (${fmtMoney(x.amount, x.currency)})?`)) return;
+  extras = extras.filter((e) => e.id !== id);
+  if (extraEditing === id) extraEditing = null;
+  saveExtras();
+  el('extra-hint').textContent = `Eliminato "${x.name}".`;
+  renderWallet();
+}
+/** Row under a manual account to change its name, amount and currency. */
+function extraEditorRow(id) {
+  const x = extras.find((e) => e.id === id);
+  const tr = document.createElement('tr');
+  tr.className = 'txd';
+  const td = document.createElement('td');
+  td.colSpan = 5;
+  const form = document.createElement('form');
+  form.className = 'xed';
+  form.autocomplete = 'off';
+  const name = Object.assign(document.createElement('input'), { value: x.name, maxLength: 40, placeholder: 'Nome' });
+  name.setAttribute('aria-label', 'Nome del conto');
+  const sign = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sec', textContent: '±', title: 'Cambia segno (per un debito)' });
+  const amount = Object.assign(document.createElement('input'), { value: String(x.amount), inputMode: 'decimal', placeholder: 'Importo' });
+  amount.setAttribute('aria-label', 'Importo');
+  const cur = document.createElement('select');
+  for (const c of ['USD', 'EUR']) cur.append(Object.assign(document.createElement('option'), { value: c, textContent: c }));
+  cur.value = x.currency;
+  const save = Object.assign(document.createElement('button'), { type: 'submit', className: 'btn', textContent: 'Salva' });
+  const cancel = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sec', textContent: 'Annulla' });
+  const del = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sec bad', textContent: 'Elimina' });
+  const msg = Object.assign(document.createElement('div'), { className: 'txn' });
+  sign.onclick = () => flipSign(amount);
+  cancel.onclick = () => { extraEditing = null; renderWallet(); };
+  del.onclick = () => deleteExtra(id);
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    const v = readAmount(amount);
+    if (v == null) { msg.textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; msg.classList.add('down'); return; }
+    Object.assign(x, { name: name.value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale', amount: v, currency: cur.value });
+    extraEditing = null;
+    saveExtras();
+    el('extra-hint').textContent = `Aggiornato "${x.name}".`;
+    renderWallet();
+  };
+  form.append(name, sign, amount, cur, save, cancel, del);
+  td.append(form, msg);
+  tr.append(td);
+  setTimeout(() => { amount.focus(); amount.select(); }, 0);
+  return tr;
+}
+function toggleExtraEditor(id) {
+  extraEditing = extraEditing === id ? null : id;
+  renderWallet();
+}
 
 /**
  * Valore Monefy, as the owner defined it: a plain numeric sum with NO currency conversion. Each
@@ -2890,7 +2967,7 @@ function renderMonefy() {
   if (!d || !Array.isArray(list)) { box.hidden = true; return; }
   // The same rows as the Conti table (names, order, manual account), each in its own currency.
   const rows = [...d.accounts];
-  if (extra) rows.push({ name: extra.name, currency: extra.currency, balance: extra.amount });
+  rows.push(...extraRows());
   rows.sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base', numeric: true }));
   const accounts = rows.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
   const net = list.reduce((sum, row) => sum + (Number(row[1]) || 0), 0);
@@ -2923,9 +3000,7 @@ function renderWallet() {
   const d = wallet && wallet.data;
   if (d) {
     const today = Date.now();
-    const rows = extra
-      ? [...d.accounts, { name: extra.name, type: 'Manual', currency: extra.currency, bankSync: false, balance: extra.amount, lastRecordDate: null, credit: null, local: true }]
-      : d.accounts;
+    const rows = [...d.accounts, ...extraRows()];
     const accounts = [...rows].sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base', numeric: true }));
     for (const a of accounts) {
       const tr = document.createElement('tr');
@@ -2936,8 +3011,9 @@ function renderWallet() {
       tag.textContent = kind.toUpperCase();
       const ren = document.createElement('button');
       ren.type = 'button'; ren.className = 'ren'; ren.textContent = '✎';
-      ren.title = 'Rinomina'; ren.setAttribute('aria-label', 'Rinomina ' + a.name);
-      ren.onclick = () => renameAccount(a);
+      ren.title = a.local ? 'Modifica nome e importo' : 'Rinomina';
+      ren.setAttribute('aria-label', ren.title + ' ' + a.name);
+      ren.onclick = () => (a.local ? toggleExtraEditor(a.localId) : renameAccount(a));
       name.append(tag, ren);
       const syncOld = a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS;
       // Plaid: a fresh real-time balance can hide transactions (and pending items) not refreshed for days.
@@ -2993,6 +3069,17 @@ function renderWallet() {
         tr.title = 'Tocca per gli ultimi movimenti';
         tr.onclick = (ev) => { if (!ev.target.closest('button')) toggleTx(a); };
         if (txOpen.has(a.id)) { tr.classList.add('open'); body.append(txDetailRow(a)); }
+      } else {
+        // Manual account: ✕ in the (empty) sync column deletes it, tapping the row edits it.
+        const del = document.createElement('button');
+        del.type = 'button'; del.className = 'xdel'; del.textContent = '✕';
+        del.title = 'Elimina'; del.setAttribute('aria-label', 'Elimina ' + a.name);
+        del.onclick = () => deleteExtra(a.localId);
+        sync.replaceChildren(del);
+        tr.classList.add('acc');
+        tr.title = 'Tocca per modificare nome e importo';
+        tr.onclick = (ev) => { if (!ev.target.closest('button')) toggleExtraEditor(a.localId); };
+        if (extraEditing === a.localId) { tr.classList.add('open'); body.append(extraEditorRow(a.localId)); }
       }
     }
     const t = accountTotals(d);
@@ -3277,14 +3364,14 @@ function renderPlaidItems(plaid) {
   }
 }
 
-/** Renames an account for every device (Worker), or the local manual account in this browser. */
+/** Renames an account for every device (Worker), or a local manual account in this browser. */
 async function renameAccount(a) {
   const input = prompt(`Nuovo nome per "${a.name}" (vuoto = nome originale${a.originalName ? ': ' + a.originalName : ''})`, a.name);
   if (input === null) return;
   const name = input.replace(/\s+/g, ' ').trim().slice(0, 60);
   if (a.local) {
-    extra = { ...extra, name: name || 'Conto manuale' };
-    write(LS.extra, extra); fillExtraForm(); renderWallet();
+    const x = extras.find((e) => e.id === a.localId);
+    if (x) { x.name = name || 'Conto manuale'; saveExtras(); renderWallet(); }
     return;
   }
   try {
