@@ -838,7 +838,7 @@ function renderSeries(fit) {
   renderRealLine();
   renderFlowLines();
   if (fit) chart.timeScale().fitContent();
-  updateLegend(null);
+  updateLegend();
   updatePeriodKpi();
 }
 
@@ -1083,12 +1083,17 @@ function fmtBarTime(t) {
   if (!iv.intraday) return d.toLocaleDateString('it-IT', { timeZone: TZ(), day: '2-digit', month: 'short', year: 'numeric' }) + (iv.sec === 604800 ? ' (sett.)' : '');
   return d.toLocaleString('it-IT', { timeZone: TZ(), day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
-function updateLegend(param) {
+/**
+ * Chart time of the bar under the crosshair (a tap or the mouse), or null for the latest bar. Kept
+ * across live updates, so the legend keeps showing the chosen bar while prices keep flowing; it goes
+ * back to the latest bar when the crosshair leaves the chart.
+ */
+let legendTime = null;
+function updateLegend() {
   if (!state.agg.length) { $('legend').innerHTML = ''; return; }
   let idx = state.agg.length - 1;
-  if (param && param.time != null) {
-    const want = param.time;
-    const j = state.chartTimes.indexOf(want);
+  if (legendTime != null) {
+    const j = state.chartTimes.indexOf(legendTime);
     if (j >= 0) idx = j;
   }
   const b = state.agg[idx];
@@ -1123,7 +1128,7 @@ function legendTitle() {
   const t = { all: 'Tutto il portafoglio', broker: BROKER, crypto: 'Crypto' }[state.scope];
   return state.aggMeta && state.aggMeta.real ? esc(t) + ' · storico reale' : esc(t) + exactSinceText();
 }
-chart.subscribeCrosshairMove((param) => updateLegend(param && param.time != null ? param : null));
+chart.subscribeCrosshairMove((param) => { legendTime = param && param.time != null ? param.time : null; updateLegend(); });
 
 /* ------------------------------------------------------------------ real history */
 /** Daily real values for a scope from the brief's history, or null if not available. */
@@ -1308,7 +1313,7 @@ function applyLiveToChart() {
     mainSeries.update(toSeriesPoint(last, state.chartTimes[state.chartTimes.length - 1]));
     updateRealLineTail();
   }
-  updateLegend(null);
+  updateLegend();
   updatePeriodKpi();
 }
 
@@ -1862,9 +1867,9 @@ $('seg-scale').onclick = (e) => {
 };
 $('opt-static').onchange = (e) => { state.includeStatic = e.target.checked; store.set('includeStatic', state.includeStatic); renderTable(); updateKpis(); rebuild(false); };
 $('opt-contrib').onchange = (e) => { state.showContrib = e.target.checked; store.set('showContrib', state.showContrib); renderRealOverlay(); };
-$('opt-flows').onchange = (e) => { state.showFlows = e.target.checked; store.set('showFlows', state.showFlows); renderFlowLines(); updateLegend(null); };
-$('opt-real').onchange = (e) => { state.showReal = e.target.checked; store.set('showReal', state.showReal); renderRealLine(); updateLegend(null); };
-$('opt-trades').onchange = (e) => { state.showTrades = e.target.checked; store.set('showTrades', state.showTrades); renderFlowLines(); updateLegend(null); };
+$('opt-flows').onchange = (e) => { state.showFlows = e.target.checked; store.set('showFlows', state.showFlows); renderFlowLines(); updateLegend(); };
+$('opt-real').onchange = (e) => { state.showReal = e.target.checked; store.set('showReal', state.showReal); renderRealLine(); updateLegend(); };
+$('opt-trades').onchange = (e) => { state.showTrades = e.target.checked; store.set('showTrades', state.showTrades); renderFlowLines(); updateLegend(); };
 $('seg-mode').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   state.valueMode = b.dataset.v; store.set('valueMode', state.valueMode);
