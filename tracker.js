@@ -162,7 +162,12 @@ const fmtPrice = (v) => {
   const d = v >= 1000 ? 2 : v >= 1 ? 2 : 4;
   return v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 };
-const fmtQty = (v) => v == null ? '—' : (Number.isInteger(v) ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { maximumFractionDigits: 8 }));
+const fmtQty = (v) => {
+  // Always a number: a string quantity (snapshot, imported file) would otherwise reach the HTML as is.
+  const n = v == null || v === '' ? NaN : Number(v);
+  if (!isFinite(n)) return '—';
+  return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toLocaleString('en-US', { maximumFractionDigits: 8 });
+};
 const cls = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
 /**
  * Text for HTML templates. Symbols, names, dates and messages come from the snapshot, the Worker, Yahoo
@@ -506,15 +511,23 @@ function priceOf(p) {
  * before midnight, from Yahoo's quote. Until a reference is known, the brief's previous close.
  */
 const dayRef = { day: null, prices: {}, fromBars: {} };
+/** A rollover seen within this many seconds of midnight means the page was running at midnight. */
+const ROLLOVER_LIVE_SEC = 120;
 function ensureDay() {
   const m = localMidnight();
   if (dayRef.day === m) return m;
   const rolled = dayRef.day != null;
   dayRef.day = m;
   dayRef.prices = {}; dayRef.fromBars = {};
-  // Page open across midnight: the current price is the price at the stroke of midnight.
-  // On first load the references arrive from Coinbase and Yahoo instead.
-  if (rolled) for (const p of positions()) if (isMarketPos(p)) { dayRef.prices[p.symbol] = priceOf(p); dayRef.fromBars[p.symbol] = true; }
+  if (rolled && nowSec() - m < ROLLOVER_LIVE_SEC) {
+    // Page running at the stroke of midnight: the current price is the price at midnight.
+    for (const p of positions()) if (isMarketPos(p)) { dayRef.prices[p.symbol] = priceOf(p); dayRef.fromBars[p.symbol] = true; }
+  } else if (rolled) {
+    // Midnight noticed late (device asleep, tab frozen) or a new time zone: the current price is not the
+    // price at midnight, so read the references from the bars, as on first load.
+    setTimeout(loadDayRefs, 0);
+  }
+  // On first load the references arrive from Coinbase and Yahoo (loadDayRefs at boot).
   return m;
 }
 function setDayRef(sym, price, fromBars) {
@@ -645,6 +658,8 @@ async function pollYahoo() {
   if (ok) yahooErr = fail ? `${fail} simboli senza prezzo` : '';
   refreshStocksPill();
   const sec = open ? Math.max(10, +state.settings.pollSec || 30) : 600;
+  // Runs can overlap (foreground, settings, new snapshot): keep a single pending timer, or the loops multiply.
+  clearTimeout(pollTimer);
   pollTimer = setTimeout(pollYahoo, sec * 1000);
 }
 async function sparkQuotes(ysyms) {
@@ -1568,15 +1583,20 @@ function buildTwrBase() {
     }
   }
   const idx = new Array(n).fill(null);
-  let level = 1, prev = null, start = -1, last = -1;
+  let level = 1, prev = null, start = -1, last = -1, carry = 0;
   for (let i = 0; i < n; i++) {
     const v = vals[i];
-    if (v == null || !isFinite(v)) continue;
-    if (prev != null && prev + flow[i] / 2 > 1) level *= 1 + (v - prev - flow[i]) / (prev + flow[i] / 2);
-    if (start < 0 && (v > 1 || flow[i] > 0)) start = i;
+    // A day without a value keeps its flow for the next day that has one: dropped, the money would
+    // count as return in the next step.
+    if (v == null || !isFinite(v)) { carry += flow[i]; continue; }
+    const fl = flow[i] + carry;
+    carry = 0;
+    if (prev != null && prev + fl / 2 > 1) level *= 1 + (v - prev - fl) / (prev + fl / 2);
+    if (start < 0 && (v > 1 || fl > 0)) start = i;
     if (start >= 0) idx[i] = level;
     prev = v; last = i;
   }
+  pending += carry; // flows after the last day with a value belong to the live step
   if (start < 0) return { why: 'Nessun valore investito in questa vista' };
   return { dates, idx, start, last, lastValue: vals[last], level, pending };
 }

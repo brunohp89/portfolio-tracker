@@ -283,6 +283,8 @@ async function downloadFile(env, id) {
 
 const WALLET_API = "https://rest.budgetbakers.com/wallet/v1/api";
 const WALLET_PAGE = 200;
+/** Safety bound on the account pages read in one call. */
+const WALLET_MAX_PAGES = 20;
 const WALLET_TTL_MS = 10 * 60 * 1000;
 /** Shortest gap between two forced refreshes, to stay well inside Wallet's 300 requests/hour. */
 const WALLET_FORCE_MIN_MS = 60 * 1000;
@@ -323,13 +325,15 @@ async function walletFetch(env, path, params) {
 async function walletAccounts(env) {
   const accounts = [];
   let headers = null;
-  for (let offset = 0; ; ) {
+  for (let offset = 0, pages = 0; pages < WALLET_MAX_PAGES; pages++) {
     const page = await walletFetch(env, "accounts", { archived: "false", limit: String(WALLET_PAGE), offset: String(offset) });
     headers = headers || page.headers;
     const items = page.data.accounts || [];
     accounts.push(...items);
-    if (!items.length || page.data.nextOffset == null) break;
-    offset = Number(page.data.nextOffset);
+    const next = Number(page.data.nextOffset);
+    // A nextOffset that does not move forward would loop forever (and burn Wallet's hourly quota).
+    if (!items.length || page.data.nextOffset == null || !(next > offset)) break;
+    offset = next;
   }
   return { accounts, headers };
 }
@@ -369,7 +373,8 @@ async function walletEurUsd(env, accounts) {
     });
     const rec = data.records && data.records[0];
     const rate = rec && rec.convertedAmount && Number(rec.convertedAmount.ratio);
-    return rate ? { rate, asOf: rec.recordDate.slice(0, 10), source: "wallet" } : null;
+    if (!(rate > 0.5 && rate < 2.5)) return null; // same sanity bounds as the Yahoo rate
+    return { rate, asOf: String(rec.recordDate || "").slice(0, 10), source: "wallet" };
   } catch {
     return null;
   }
@@ -480,7 +485,7 @@ async function walletSummary(env, force, ctx) {
   // Custom names last, so CREDIT_LIMITS and the Wallet/Plaid matching keep using the original names.
   const names = await loadNames(env);
   for (const a of accounts) {
-    const custom = names[a.id] || (a.walletId && names[a.walletId]);
+    const custom = ownName(names, a.id) || ownName(names, a.walletId);
     if (custom) { a.originalName = a.name; a.name = custom; }
   }
 
@@ -491,9 +496,19 @@ async function walletSummary(env, force, ctx) {
     const usd = (byCurrency.USD || 0) + (byCurrency.EUR || 0) * fx.rate;
     total = { usd: round2(usd), eur: round2(usd / fx.rate) };
   }
-  const cards = accounts.filter((a) => a.credit && a.credit.limit);
-  const owed = cards.reduce((s, a) => s + a.credit.owed, 0);
-  const limit = cards.reduce((s, a) => s + a.credit.limit, 0);
+  // Overall credit use in USD: a EUR card is converted at the same rate as the totals, never added as
+  // dollars; a card in a currency that cannot be converted is left out of this line.
+  const toUsd = (v, cur) => (cur === "USD" ? v : cur === "EUR" && fx ? v * fx.rate : null);
+  let owed = 0;
+  let limit = 0;
+  for (const a of accounts) {
+    if (!a.credit || !a.credit.limit) continue;
+    const o = toUsd(a.credit.owed, a.currency);
+    const l = toUsd(a.credit.limit, a.currency);
+    if (o == null || l == null) continue;
+    owed += o;
+    limit += l;
+  }
 
   const body = {
     ok: true,
@@ -517,7 +532,6 @@ async function walletSummary(env, force, ctx) {
 
 const PLAID_HOSTS = { production: "https://production.plaid.com", sandbox: "https://sandbox.plaid.com" };
 const PLAID_ITEM_PREFIX = "item:";
-/** Pending transactions are looked up in this window; they rarely stay pending longer. */
 /** Transactions are read over this window: pending items rarely stay longer, and it gives ~20 per account. */
 const PLAID_PENDING_DAYS = 30;
 const PLAID_POST_ROUTES = { "/plaid/link-token": plaidLinkToken, "/plaid/exchange": plaidExchange };
@@ -599,10 +613,10 @@ async function plaidExchange(env, input) {
 
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-/** Asks Plaid to fetch this bank's transactions now (asynchronous: new items show up on a later read). */
 /** Last refresh error worth showing: a TIMEOUT stored by an older version only meant "slow bank". */
 const refreshError = (prev) => (prev && prev.txRefreshError && prev.txRefreshError.code !== "TIMEOUT" ? prev.txRefreshError : null);
 
+/** Asks Plaid to fetch this bank's transactions now (asynchronous: new items show up on a later read). */
 async function plaidTxRefresh(env, item, prev, today) {
   const at = (prev && prev.txRefreshAt) || 0;
   const blockedUntil = (prev && prev.txRefreshBlockedUntil) || 0;
@@ -812,8 +826,10 @@ function latestTransactions(list) {
 function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const b = a.balances || {};
   const isCredit = a.type === "credit";
+  // Loans (mortgage, auto, student): Plaid's current is the principal still owed, so it is a debt too.
+  const isLoan = a.type === "loan";
   const current = Number(b.current ?? b.available ?? 0);
-  const posted = isCredit ? -current : current; // credit: Plaid's current is the amount owed
+  const posted = isCredit || isLoan ? -current : current; // credit and loans: Plaid's current is the amount owed
   const out = pend ? pend.out : 0;
   // Holds the bank counts but Plaid does not list (seen on a card whose authorisation only shows in
   // its available credit): for credit cards, what the bank holds = (limit - available) - posted debt.
@@ -834,7 +850,7 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   let implied = null;
   if (isCredit) {
     if (b.limit != null && b.available != null) implied = -(Number(b.limit) - Number(b.available));
-  } else if (b.available != null) {
+  } else if (!isLoan && b.available != null) {
     implied = Number(b.available);
   }
   const balance = computed;
@@ -844,7 +860,7 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   const acc = {
     id: "plaid:" + a.account_id,
     name: [item.institutionName, a.official_name || a.name].filter(Boolean).join(" · "),
-    type: isCredit ? "CreditCard" : a.subtype === "savings" ? "Savings" : "CurrentAccount",
+    type: isCredit ? "CreditCard" : isLoan ? "Loan" : a.subtype === "savings" ? "Savings" : "CurrentAccount",
     currency: b.iso_currency_code || b.unofficial_currency_code || "USD",
     source: "plaid",
     institution: item.institutionName,
@@ -956,9 +972,36 @@ async function plaidSummary(env, limits, force, ctx) {
   const fresh = await plaidFresh(env, force, ctx);
   // A limit set in CREDIT_LIMITS (by the Wallet name, applied in mergeAccounts) wins; keep Plaid's otherwise.
   // The transactions stay in the cache: GET /accounts/transactions serves them one account at a time.
-  const accounts = fresh.accounts.map(({ recent, ...a }) => ({ ...a, _limits: limits }));
+  const accounts = dedupePlaidAccounts(fresh.accounts).map(({ recent, ...a }) => ({ ...a, _limits: limits }));
   // Raw balances (kept for reusing a recent real-time read) stay in the Worker.
   return { configured: true, items: fresh.items.map(({ raw, ...s }) => s), accounts };
+}
+
+/**
+ * A joint account visible from two logins at the same bank comes back once per login (one Item each).
+ * Keep one copy, matched by bank, last 4 digits, currency and type, so it is not counted twice; the copy
+ * with a real-time balance wins. Accounts of the same Item are never merged (one login lists each
+ * account once, so two of its accounts with the same key are different accounts).
+ */
+function dedupePlaidAccounts(accounts) {
+  const out = [];
+  const byKey = new Map(); // key -> { itemId: first Item with it, at: [indexes in out] }
+  for (const a of accounts) {
+    const bank = String(a.institution || "").trim().toLowerCase();
+    const key = bank && a.mask ? [bank, a.mask, a.currency, a.type].join("|") : null;
+    const seen = key == null ? undefined : byKey.get(key);
+    if (seen === undefined || seen.itemId === a.itemId) {
+      if (key != null) {
+        if (seen) seen.at.push(out.length);
+        else byKey.set(key, { itemId: a.itemId, at: [out.length] });
+      }
+      out.push(a);
+      continue;
+    }
+    // Another login sees the same account: one copy only (two same-key accounts in one Item stay apart).
+    if (seen.at.length === 1 && a.balanceLive && !out[seen.at[0]].balanceLive) out[seen.at[0]] = a;
+  }
+  return out;
 }
 
 /**
@@ -1015,6 +1058,9 @@ async function plaidInstitutions(env, query) {
 
 const NAMES_KEY = "names";
 const NAME_MAX = 60;
+
+/** Custom name stored for this id: own string properties only (never Object.prototype members). */
+const ownName = (names, id) => (typeof id === "string" && Object.prototype.hasOwnProperty.call(names, id) && typeof names[id] === "string" ? names[id] : null);
 
 async function loadNames(env) {
   if (!env.PLAID_KV) return {};
@@ -1097,8 +1143,14 @@ async function accountTransactions(env, id) {
   if (typeof id !== "string" || !/^[A-Za-z0-9:_-]{6,120}$/.test(id)) throw new HttpError(400, "bad_request", "id missing or invalid");
   if (id.startsWith("plaid:")) {
     if (!plaidConfigured(env)) throw new HttpError(404, "account_not_found");
-    const shared = plaidCache.items ? null : await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
-    const acc = (((plaidCache.items ? plaidCache : shared) || {}).accounts || []).find((a) => a.id === id);
+    // Another isolate (or a background completion) may have written a newer read than this isolate's
+    // memory: per Item, the newest of the two, as the /wallet answer uses.
+    const shared = await env.PLAID_KV.get(PLAID_CACHE_KEY, "json").catch(() => null);
+    let acc = null;
+    for (const e of newestItems([plaidCache, shared]).values()) {
+      acc = e.accounts.find((a) => a.id === id);
+      if (acc) break;
+    }
     if (!acc) throw new HttpError(404, "account_not_found", "account not in the last Plaid read");
     return {
       ok: true,
@@ -1138,6 +1190,8 @@ async function accountTransactions(env, id) {
       transfer: !!r.transfer,
     })),
   };
-  walletTxCache.set(id, { at: Date.now(), body });
+  const now = Date.now();
+  for (const [k, v] of walletTxCache) if (now - v.at >= WALLET_TX_TTL_MS) walletTxCache.delete(k);
+  walletTxCache.set(id, { at: now, body });
   return body;
 }

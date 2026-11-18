@@ -36,6 +36,7 @@ from typing import Any
 
 API_BASE = "https://rest.budgetbakers.com/wallet/v1/api"
 PAGE_SIZE = 200
+MAX_PAGES = 200  # safety bound: a nextOffset that never moves forward would loop forever
 DUPLICATE_LOOKBACK_DAYS = 120
 TIMEOUT_S = 60
 
@@ -105,15 +106,16 @@ def _get_json(url: str, token: str | None = None) -> tuple[dict[str, Any], dict[
 def _paginate(path: str, key: str, token: str, params: list[tuple[str, str]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     offset = 0
-    while True:
+    for _ in range(MAX_PAGES):
         query = urllib.parse.urlencode([*params, ("limit", str(PAGE_SIZE)), ("offset", str(offset))])
         payload, _ = _get_json(f"{API_BASE}/{path}?{query}", token)
         page = payload.get(key, [])
         items.extend(page)
         next_offset = payload.get("nextOffset")
-        if not page or next_offset is None:
+        if not page or next_offset is None or int(next_offset) <= offset:
             return items
         offset = int(next_offset)
+    raise WalletApiError(f"{path}: more than {MAX_PAGES} pages, stopping")
 
 
 def fetch_accounts(token: str) -> list[dict[str, Any]]:
@@ -132,7 +134,10 @@ def build_balance(account: dict[str, Any], limits: dict[str, float]) -> AccountB
     balance = account.get("balance") or {}
     # rawCurrentBalance is the signed ledger value; Wallet's display formula for
     # bank-synced cards applies -abs(), which would turn an overpayment into debt.
-    raw = float(balance.get("rawCurrentBalance", balance.get("currentBalance", 0.0)))
+    raw_value = balance.get("rawCurrentBalance")
+    if raw_value is None:  # same fallback as the Worker (`??`): a null field must not crash float()
+        raw_value = balance.get("currentBalance")
+    raw = float(raw_value or 0.0)
     last = ((account.get("recordStats") or {}).get("recordDate") or {}).get("max")
     common = dict(
         name=account["name"],
@@ -166,7 +171,8 @@ def find_duplicates(records: list[dict[str, Any]]) -> list[DuplicateGroup]:
     """
     groups: dict[tuple[str, str, float], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        key = (record["accountName"], record["recordDate"][:10], float(record["amount"]["value"]))
+        account = record.get("accountName") or record.get("accountId") or "?"
+        key = (account, record["recordDate"][:10], float(record["amount"]["value"]))
         groups[key].append(record)
 
     flagged: list[DuplicateGroup] = []
@@ -272,7 +278,7 @@ def main() -> int:
         balances = [build_balance(a, limits) for a in accounts]
         since = date.today() - timedelta(days=DUPLICATE_LOOKBACK_DAYS)
         account_ids = {a["id"] for a in accounts}
-        records = [r for r in fetch_records(token, since) if r["accountId"] in account_ids]
+        records = [r for r in fetch_records(token, since) if r.get("accountId") in account_ids]
         duplicates = find_duplicates(records)
     except (WalletApiError, urllib.error.URLError) as exc:
         print(f"Wallet API error: {exc}", file=sys.stderr)

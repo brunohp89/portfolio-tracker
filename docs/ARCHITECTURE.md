@@ -1,6 +1,6 @@
 # Portfolio system: architecture and data flows
 
-Status as of 2026-11-16. This document describes how the Portfolio Brief, the Portfolio Tracker
+Status as of 2026-11-18. This document describes how the Portfolio Brief, the Portfolio Tracker
 PWA, the two Cloudflare Workers and the external data sources fit together. It lists secret
 **names** and where they live, never their values.
 
@@ -204,11 +204,12 @@ sequenceDiagram
       W->>L: /transactions/refresh (forced reads only, max 1 per 5 min per bank)
     end
     W->>W: drop Investment accounts, map Wallet accounts
+    W->>W: one copy of a joint account seen through two Plaid logins
     W->>W: Plaid accounts replace their Wallet twin (same currency + last 4 digits)
     W->>W: pending guards, totals by currency, USD/EUR totals, credit utilization
     W-->>P: summary (no tokens in it)
   end
-  P->>P: add the local manual account (localStorage pt.extra) to totals
+  P->>P: add the manual accounts ("manual" in /wallet, copy in localStorage pt.extras) to totals
   P->>P: Patrimonio totale = portfolio at live prices (CD and cash included) + accounts total USD
   P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
 ```
@@ -267,7 +268,7 @@ Balance rules:
   `/accounts/get` (15 per minute per Item). After a `BALANCE_LIMIT` answer it falls back to
   `/accounts/get` in the same request and suspends real-time reads for that Item for 1 hour. The state
   (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes.
-  Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
+  Balance = posted balance (credit and loan: `-current`, depository: `current`) plus the listed pending
   transactions, then the two guards below. The raw balances of a real-time read are kept in the
   shared cache (never sent to the app) so the transactions can be read again while that read is reused.
 - **Slow banks (soft deadline and background completion):** real-time reads and
@@ -303,7 +304,13 @@ Balance rules:
   the detail). Only done when the transactions were read. Risk: a bank that lowers the available
   credit for other reasons (blocks, payments being processed) shows that amount as pending.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
-  account name); Wallet's own limit as a last resort.
+  account name); Wallet's own limit as a last resort. The overall utilization under the table is in USD:
+  a EUR card is converted at the EURUSD rate, a card in another currency is left out of it.
+- **Loans:** Plaid `loan` accounts (mortgage, auto, student) are debts: `current` is the principal still
+  owed, so the balance is `-current` (type `Loan`, no credit line, pending check `unverified`).
+- **Joint accounts across Plaid logins:** an account visible from two logins at the same bank is kept
+  once (same institution name, last 4 digits, currency and type, from two different Items); the copy
+  with a real-time balance wins. Two accounts with the same key inside one Item stay separate.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
   if Yahoo does not answer, the rate Wallet applied to the latest EUR record (shown as such).
 - **If a Plaid bank fails**, its accounts fall back to the Wallet data and the bank is listed with its
@@ -414,7 +421,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 Elsewhere:
 
 - **Browser `localStorage`:** `pt.conn` (Worker URL + TOKEN), `pt.remote` (last snapshot),
-  `pt.wallet` (last `/wallet` answer), `pt.extra` (manual account), `pt.labels` (private labels), `pt.plaidLink` (link token during
+  `pt.wallet` (last `/wallet` answer), `pt.extras` (copy of the manual accounts), `pt.extrasSynced`, `pt.labels` (private labels), `pt.plaidLink` (link token during
   OAuth), `pt.settings` and other UI preferences.
 - **Snapshot `config`:** Yahoo proxy URL and Finnhub key, written by the brief.
 - **Brief:** `config.json` in the plugin; constants (artifact URL, Drive folder ids) in `SKILL.md`.
@@ -465,12 +472,9 @@ Elsewhere:
 
 ### Open issues (not fixed yet)
 
-- **Joint accounts across Plaid logins:** a joint account visible from two logins (e.g. the two
-  logins at the same bank) is returned twice; only the first copy replaces its Wallet twin, the second is added as
-  a new row and counted twice. Fix: dedupe Plaid accounts by institution + last 4 digits + currency.
-- **Loans:** for Plaid `loan` accounts (mortgage, auto, student) `current` is the amount owed, but
-  `plaidAccount` treats every non-credit account as an asset, so a loan would raise the net worth.
-  Fix: treat `loan` like `credit` (negative balance).
+- **Manual accounts and names, concurrent edits:** `POST /accounts/manual` and `/accounts/rename` read,
+  change and write one KV key; two edits from two devices in the same second can lose one of them
+  (KV has no transactions). Harmless for a single user editing one thing at a time.
 - **Last 4 digits matching:** a new Plaid account with the same last 4 digits and currency as an
   unrelated Wallet account would replace it.
 
