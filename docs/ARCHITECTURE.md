@@ -375,7 +375,9 @@ logins of the household). One more bank is read only through Wallet.
 ### 4.5 Manual accounts and settings
 
 - **Manual accounts** under the Conti table: any number of them (name, amount, USD/EUR, a "±" button
-  for debts), added with the form below the table. In the table, ✎ or a tap on the row opens an
+  for debts), added with the form below the table. Amounts are typed Italian style: the comma is the
+  only decimal separator and dots may only group thousands (`1250,50`, `1.250,50`); anything else,
+  `1250.50` included, is refused with an error message instead of being guessed. In the table, ✎ or a tap on the row opens an
   editor for name, amount and currency, ✕ (in the empty sync column) deletes the account after a
   confirmation. Shared by every device: the Worker keeps them in `PLAID_KV` (`manual`), changes go
   through `POST /accounts/manual` (`upsert` or `delete` of one account, answered with the whole list),
