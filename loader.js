@@ -286,13 +286,20 @@ function bankTotalUsd() {
   return wallet && wallet.data ? accountTotals(wallet.data).usd : null;
 }
 
-/** Accepts 1250.5, 1250,5, 1.250,50 and 1,250.50: the last separator is the decimal one. */
+/**
+ * Amount typed for a manual account, Italian style: the comma is the only decimal separator and dots
+ * may only group thousands (1250,50 or 1.250,50 or -1.250). Anything else, 1250.50 included, is
+ * refused: a dot read as a decimal or as a thousands separator would silently change the amount.
+ * Returns the number as text for Number(), or '' when the text is not a valid amount.
+ */
 function parseAmount(text) {
-  let t = String(text || '').trim().replace(/[\s'€$]/g, '').replace(/^[−–]/, '-');
-  const dec = Math.max(t.lastIndexOf(','), t.lastIndexOf('.'));
-  if (dec >= 0) t = t.slice(0, dec).replace(/[.,]/g, '') + '.' + t.slice(dec + 1);
-  return t;
+  const t = String(text || '').replace(/[\s€$]/g, '').replace(/^[−–]/, '-');
+  if (!/^-?(\d{1,3}(\.\d{3})+|\d+)(,\d+)?$/.test(t)) return '';
+  return t.replace(/\./g, '').replace(',', '.');
 }
+/** The amount as it is typed back into the editor: decimal comma, no grouping. */
+const amountText = (v) => String(v).replace('.', ',');
+const AMOUNT_ERROR = 'Importo non valido: usa la virgola per i decimali, ad esempio 1250,50 o 1.250,50';
 
 const EXTRA_HINT = 'Condivisi tra tutti i dispositivi: entrano nei totali dei conti e nel patrimonio totale. Usa ✎ per modificarli e ✕ per eliminarli.';
 /** Amount typed in a field: a number rounded to cents, or null (empty or invalid). */
@@ -309,7 +316,7 @@ const flipSign = (input) => {
 el('extra-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const amount = readAmount(el('extra-amount'));
-  if (amount == null) { el('extra-hint').textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; return; }
+  if (amount == null) { el('extra-hint').textContent = AMOUNT_ERROR; return; }
   const name = el('extra-name').value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale';
   const btn = el('extra-form').querySelector('button[type=submit]');
   btn.disabled = true;
@@ -352,7 +359,7 @@ function extraEditorRow(id) {
   const name = Object.assign(document.createElement('input'), { value: x.name, maxLength: 40, placeholder: 'Nome' });
   name.setAttribute('aria-label', 'Nome del conto');
   const sign = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sec', textContent: '±', title: 'Cambia segno (per un debito)' });
-  const amount = Object.assign(document.createElement('input'), { value: String(x.amount), inputMode: 'decimal', placeholder: 'Importo' });
+  const amount = Object.assign(document.createElement('input'), { value: amountText(x.amount), inputMode: 'decimal', placeholder: 'Importo (es. 1.250,50)' });
   amount.setAttribute('aria-label', 'Importo');
   const cur = document.createElement('select');
   for (const c of ['USD', 'EUR']) cur.append(Object.assign(document.createElement('option'), { value: c, textContent: c }));
@@ -367,7 +374,7 @@ function extraEditorRow(id) {
   form.onsubmit = async (ev) => {
     ev.preventDefault();
     const v = readAmount(amount);
-    if (v == null) { msg.textContent = 'Importo non valido: usa un numero, ad esempio 1250.50'; msg.classList.add('down'); return; }
+    if (v == null) { msg.textContent = AMOUNT_ERROR; msg.classList.add('down'); return; }
     const next = { ...x, name: name.value.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conto manuale', amount: v, currency: cur.value };
     save.disabled = true; msg.classList.remove('down'); msg.textContent = 'Salvo…';
     try {
