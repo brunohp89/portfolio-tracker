@@ -139,7 +139,8 @@ el('connect-form').addEventListener('submit', async (ev) => {
 // ---------- bank accounts (BudgetBakers Wallet through the Worker's /wallet route) ----------
 let wallet = read(LS.wallet);   // { data, fetchedAt }
 let walletErr = '';
-let walletBusy = false;
+/** The /wallet read in flight, if any: { promise, force }. */
+let walletRun = null;
 /** A bank-synced account not synced for longer than this gets the alarm icon. */
 const SYNC_ALARM_MS = 24 * 60 * 60 * 1000;
 const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { timeZone: TZ(), day: '2-digit', month: '2-digit' }) : '—';
@@ -194,9 +195,18 @@ function cell(text, cls) {
  * device shares them; this browser keeps a copy (pt.extras) to start without network. */
 const validExtra = (x) => !!x && typeof x.amount === 'number' && isFinite(x.amount) && (x.currency === 'USD' || x.currency === 'EUR');
 const newExtraId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+/** Same id rule as the Worker: an id it would refuse would block the first upload, and with it the sync, forever. */
+const EXTRA_ID = /^[A-Za-z0-9_-]{1,40}$/;
+let extrasFixed = false;
+const normExtra = (x) => {
+  const id = EXTRA_ID.test(String(x.id || '')) ? String(x.id) : newExtraId();
+  const name = typeof x.name === 'string' && x.name.trim() ? x.name : 'Conto manuale';
+  if (id !== x.id || name !== x.name) extrasFixed = true;
+  return { ...x, id, name };
+};
 let extras = (() => {
   const list = read(LS.extras);
-  if (Array.isArray(list)) return list.filter(validExtra).map((x) => ({ ...x, id: String(x.id || newExtraId()) }));
+  if (Array.isArray(list)) return list.filter(validExtra).map(normExtra);
   const single = read(LS.extra); // the single manual account of earlier versions
   return validExtra(single) ? [{ id: newExtraId(), name: single.name || 'Conto manuale', amount: single.amount, currency: single.currency }] : [];
 })();
@@ -204,7 +214,8 @@ function saveExtras() {
   write(LS.extras, extras);
   try { localStorage.removeItem(LS.extra); } catch { /* storage unavailable */ }
 }
-if (read(LS.extra)) saveExtras(); // finish the migration once
+// Finish the migration once; keep repaired ids, so an upload retried later reuses the same id.
+if (read(LS.extra) || extrasFixed) saveExtras();
 
 /** Reads only the shared manual accounts (a KV read, no bank call): used when the balances are recent
  * enough to skip /wallet, so a change made on another device still shows at once. */
@@ -557,9 +568,21 @@ function renderWallet() {
  * force skips both caches (the Worker still allows at most one forced read a minute).
  */
 async function refreshWallet(force) {
-  if (!conn || walletBusy) return;
+  if (!conn) return;
+  // A read already in flight: wait for it. A forced read ("Aggiorna ora", the recheck after a refresh)
+  // still runs afterwards unless the one in flight was forced too; before, it was dropped silently and
+  // the button reported the previous answer.
+  while (walletRun) {
+    const run = walletRun;
+    await run.promise;
+    if (!force || run.force) return;
+  }
   if (!force && wallet && Date.now() - wallet.fetchedAt < RECHECK_MS && !walletErr) { renderWallet(); syncManual(); return; }
-  walletBusy = true;
+  const promise = readWallet(force);
+  walletRun = { promise, force: !!force };
+  try { await promise; } finally { if (walletRun && walletRun.promise === promise) walletRun = null; }
+}
+async function readWallet(force) {
   const ctrl = new AbortController();
   // The Worker bounds every Plaid call (live balance 8 s, others 12 s); Wallet runs alongside.
   const timer = setTimeout(() => ctrl.abort(), 40000);
@@ -579,7 +602,6 @@ async function refreshWallet(force) {
     walletErr = walletErrorText(err);
   } finally {
     clearTimeout(timer);
-    walletBusy = false;
     renderWallet();
   }
 }
