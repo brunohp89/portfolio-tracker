@@ -137,10 +137,10 @@ const state = {
   status: { crypto: 'off', stocks: 'off' },
 };
 if (!INTERVALS[state.interval]) state.interval = '1h';
-/** Periods offered for an interval: "since the last contribution" only with the real history. */
+/** Periods offered for an interval: "since the last contribution" with daily and weekly candles. */
 function rangesFor(ivKey) {
   const base = INTERVALS[ivKey].ranges;
-  return state.valueMode === 'real' && !INTERVALS[ivKey].intraday ? base.concat(['LASTC']) : base;
+  return INTERVALS[ivKey].intraday ? base : base.concat(['LASTC']);
 }
 if (!state.range || !rangesFor(state.interval).includes(state.range)) state.range = INTERVALS[state.interval].def;
 
