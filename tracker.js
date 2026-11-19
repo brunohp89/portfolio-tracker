@@ -955,8 +955,9 @@ function drawFlowLines() {
   });
 }
 /**
- * Current positions mode: shade the parts of the chart where today's positions are worth the real
- * value of the view (blue) or within REAL_TOLERANCE of it (purple), one band per run of bars.
+ * Current positions mode: shade in blue the bars from the last flow or trade of the view on, where
+ * the chart is the real value, and in purple the earlier bars where today's positions are within
+ * REAL_TOLERANCE of the real value, one band per run of bars.
  * Without a real history to compare with (intraday, custom view), shade in blue from the bar of
  * the last flow or trade of the view to the right edge: there today's quantities were already held.
  */
@@ -974,28 +975,24 @@ function exactShade(ts, w, axisH) {
       if (x0 == null || x1 == null) return;
       const left = Math.max(0, Math.round(x0)), right = Math.min(w, Math.round(x1));
       if (right <= left) return;
-      const text = kind === 'exact' ? `uguale al reale dal ${fmtBarDay(state.agg[from].t)}` : `entro ${pct}% del reale`;
+      const text = kind === 'exact' ? `uguale al reale dal ${fmtBarDay(exactBandDay(from))}` : `entro ${pct}% del reale`;
       const label = k === lastOf[kind] && (k === ranges.length - 1 || right - left >= 140) ? `<span>${text}</span>` : '';
       html += `<div class="exact${kind === 'near' ? ' near' : ''}" style="left:${left}px;width:${right - left}px;bottom:${axisH}px">${label}</div>`;
     });
     return html;
   }
-  const since = positionsExactSince();
-  if (!since) return '';
-  const iv = INTERVALS[state.interval];
-  const t0 = localDayTs(since), key = iv.intraday ? t0 : bucketStart(t0, iv.sec);
-  const times = state.agg.map((b) => b.t);
-  let left;
-  if (key < times[0]) left = 0; // positions unchanged over the whole history shown
-  else {
-    const j = firstOnOrAfterNum(times, key);
-    if (j >= times.length) return ''; // changed after the last bar: nothing real to shade yet
-    const x = ts.timeToCoordinate(state.chartTimes[j]);
-    if (x == null) return '';
-    left = Math.max(0, Math.round(x));
-  }
+  const j = exactSinceBar(); // null: unknown, or changed after the last bar (nothing real to shade yet)
+  if (j == null) return '';
+  const x = ts.timeToCoordinate(state.chartTimes[j]);
+  if (x == null) return '';
+  const left = Math.max(0, Math.round(x));
   if (left >= w) return '';
-  return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${fmtBarDay(t0)}</span></div>`;
+  return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${fmtBarDay(localDayTs(positionsExactSince()))}</span></div>`;
+}
+/** Day a blue band starts: the day of the last flow or trade, not the start of its bar. */
+function exactBandDay(from) {
+  const since = positionsExactSince();
+  return since ? Math.max(state.agg[from].t, localDayTs(since)) : state.agg[from].t;
 }
 const fmtBarDay = (t) => new Date(t * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' });
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
@@ -1067,25 +1064,37 @@ function realValuesByBar() {
 }
 /** Gap between today's positions and the real value, as a share of the real value, below which the chart is shaded. */
 const REAL_TOLERANCE = 0.05;
-/** Largest gap in dollars for today's positions and the real value to count as the same value. */
-const REAL_SAME_USD = 0.01;
 /**
- * Runs of bars where today's positions match the real value: { from, to, kind } with bar indices,
- * kind 'exact' (gap under REAL_SAME_USD) or 'near' (under REAL_TOLERANCE of the real value).
- * A bar with no real value keeps the kind of the bar before it. null when the view has no real
- * history to compare with.
+ * First bar from which today's quantities were already held (after the last flow or trade of the
+ * view), 0 if they never changed in the bars shown, null if unknown or only after the last bar.
+ */
+function exactSinceBar() {
+  const since = positionsExactSince();
+  if (!since || !state.agg.length) return null;
+  const iv = INTERVALS[state.interval];
+  const t0 = localDayTs(since), key = iv.intraday ? t0 : bucketStart(t0, iv.sec);
+  const times = state.agg.map((b) => b.t);
+  if (key < times[0]) return 0;
+  const j = firstOnOrAfterNum(times, key);
+  return j < times.length ? j : null;
+}
+/**
+ * Runs of bars where today's positions match the real value: { from, to, kind } with bar indices.
+ * kind 'exact' from the bar of the last flow or trade on: the quantities are today's, and the small
+ * gap left (accrued interest of the CDs, closes from a different source) is not a real difference.
+ * kind 'near' before it, where the gap is under REAL_TOLERANCE of the real value; a bar with no
+ * real value keeps the kind of the bar before it. null when the view has no real history.
  */
 function realMatchRanges() {
   const real = realValuesByBar();
   if (!real) return null;
+  const exactFrom = exactSinceBar();
   const out = [];
   let kind = null;
   for (let j = 0; j < state.agg.length; j++) {
     const v = real.get(j);
-    if (v != null) {
-      const gap = Math.abs(state.agg[j].c - v);
-      kind = gap < REAL_SAME_USD ? 'exact' : v !== 0 && gap < REAL_TOLERANCE * Math.abs(v) ? 'near' : null;
-    }
+    if (exactFrom != null && j >= exactFrom) kind = 'exact';
+    else if (v != null) kind = v !== 0 && Math.abs(state.agg[j].c - v) < REAL_TOLERANCE * Math.abs(v) ? 'near' : null;
     if (!kind) continue;
     const last = out[out.length - 1];
     if (last && last.to === j - 1 && last.kind === kind) last.to = j; else out.push({ from: j, to: j, kind });
@@ -1177,7 +1186,7 @@ function exactSinceText() {
     // the bands that reach today: the exact one, then the near ones right before it
     let k = ranges.length - 1;
     const parts = [];
-    if (ranges[k].kind === 'exact') { parts.push(`uguale al reale dal ${fmtBarDay(state.agg[ranges[k].from].t)}`); }
+    if (ranges[k].kind === 'exact') { parts.push(`uguale al reale dal ${fmtBarDay(exactBandDay(ranges[k].from))}`); }
     let from = ranges[k].from;
     while (k > 0 && ranges[k - 1].to === from - 1) from = ranges[--k].from;
     if (!parts.length || from < ranges[ranges.length - 1].from) parts.push(`entro ${Math.round(REAL_TOLERANCE * 100)}%${parts.length ? '' : ' del reale'} dal ${fmtBarDay(state.agg[from].t)}`);
