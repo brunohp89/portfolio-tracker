@@ -955,12 +955,31 @@ function drawFlowLines() {
   });
 }
 /**
- * Current positions mode: shade the part of the chart where today's quantities were already held,
- * from the bar of the last flow or trade of the view to the right edge. There the chart is the
- * real value of the view; before it, it is today's portfolio priced at past prices.
+ * Current positions mode: shade the parts of the chart where today's positions are worth the real
+ * value of the view (blue) or within REAL_TOLERANCE of it (purple), one band per run of bars.
+ * Without a real history to compare with (intraday, custom view), shade in blue from the bar of
+ * the last flow or trade of the view to the right edge: there today's quantities were already held.
  */
 function exactShade(ts, w, axisH) {
   if (!state.agg.length || (state.aggMeta && state.aggMeta.real)) return '';
+  const ranges = realMatchRanges();
+  if (ranges) {
+    const pct = Math.round(REAL_TOLERANCE * 100);
+    const lastOf = { exact: -1, near: -1 }; // only the latest band of each kind is labelled
+    ranges.forEach((r, k) => { lastOf[r.kind] = k; });
+    let html = '';
+    ranges.forEach(({ from, to, kind }, k) => {
+      const x0 = ts.timeToCoordinate(state.chartTimes[from]);
+      const x1 = to + 1 < state.chartTimes.length ? ts.timeToCoordinate(state.chartTimes[to + 1]) : w;
+      if (x0 == null || x1 == null) return;
+      const left = Math.max(0, Math.round(x0)), right = Math.min(w, Math.round(x1));
+      if (right <= left) return;
+      const text = kind === 'exact' ? `uguale al reale dal ${fmtBarDay(state.agg[from].t)}` : `entro ${pct}% del reale`;
+      const label = k === lastOf[kind] && (k === ranges.length - 1 || right - left >= 140) ? `<span>${text}</span>` : '';
+      html += `<div class="exact${kind === 'near' ? ' near' : ''}" style="left:${left}px;width:${right - left}px;bottom:${axisH}px">${label}</div>`;
+    });
+    return html;
+  }
   const since = positionsExactSince();
   if (!since) return '';
   const iv = INTERVALS[state.interval];
@@ -976,9 +995,9 @@ function exactShade(ts, w, axisH) {
     left = Math.max(0, Math.round(x));
   }
   if (left >= w) return '';
-  const day = new Date(t0 * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' });
-  return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${day}</span></div>`;
+  return `<div class="exact" style="left:${left}px;width:${w - left}px;bottom:${axisH}px"><span>valore reale dal ${fmtBarDay(t0)}</span></div>`;
 }
+const fmtBarDay = (t) => new Date(t * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' });
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
 chart.timeScale().subscribeSizeChange(drawFlowLines);
 const TRADE_LABEL = { buy: 'acquisto', sell: 'vendita', reinvest: 'reinvestimento', out: 'trasferimento in uscita', sent: 'inviate dal wallet' };
@@ -1023,19 +1042,55 @@ function renderRealLine() {
   syncRealToggle();
   if (realSeries) { chart.removeSeries(realSeries); realSeries = null; }
   realByBar = new Map();
-  if (!state.showReal || !state.agg.length || !state.aggMeta || state.aggMeta.real || realLineReason()) return;
+  if (!state.showReal) return;
+  const byBar = realValuesByBar();
+  if (!byBar) return;
+  realByBar = byBar;
+  const data = [...realByBar.entries()].sort((a, b) => a[0] - b[0]).map(([j, v]) => ({ time: state.chartTimes[j], value: v }));
+  realSeries = chart.addSeries(LWC.LineSeries, { color: '#d1d4dc', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  realSeries.setData(data);
+}
+/** Real value of the view at each bar (the last day of the bucket), or null where it cannot be compared. */
+function realValuesByBar() {
+  if (!state.agg.length || !state.aggMeta || state.aggMeta.real || realLineReason()) return null;
   const iv = INTERVALS[state.interval];
   const times = state.agg.map((b) => b.t);
+  const out = new Map();
   for (const p of realHistory(state.scope)) {
     const key = bucketStart(p.t, iv.sec);
     if (key < times[0]) continue;
     const j = firstOnOrAfterNum(times, key);
-    if (j < times.length && times[j] === key) realByBar.set(j, p.v); // weekly bars: the last day wins
+    if (j < times.length && times[j] === key) out.set(j, p.v); // weekly bars: the last day wins
   }
-  realByBar.set(times.length - 1, state.agg[times.length - 1].c);
-  const data = [...realByBar.entries()].sort((a, b) => a[0] - b[0]).map(([j, v]) => ({ time: state.chartTimes[j], value: v }));
-  realSeries = chart.addSeries(LWC.LineSeries, { color: '#d1d4dc', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
-  realSeries.setData(data);
+  out.set(times.length - 1, state.agg[times.length - 1].c); // today the positions are the real portfolio
+  return out;
+}
+/** Gap between today's positions and the real value, as a share of the real value, below which the chart is shaded. */
+const REAL_TOLERANCE = 0.05;
+/** Largest gap in dollars for today's positions and the real value to count as the same value. */
+const REAL_SAME_USD = 0.01;
+/**
+ * Runs of bars where today's positions match the real value: { from, to, kind } with bar indices,
+ * kind 'exact' (gap under REAL_SAME_USD) or 'near' (under REAL_TOLERANCE of the real value).
+ * A bar with no real value keeps the kind of the bar before it. null when the view has no real
+ * history to compare with.
+ */
+function realMatchRanges() {
+  const real = realValuesByBar();
+  if (!real) return null;
+  const out = [];
+  let kind = null;
+  for (let j = 0; j < state.agg.length; j++) {
+    const v = real.get(j);
+    if (v != null) {
+      const gap = Math.abs(state.agg[j].c - v);
+      kind = gap < REAL_SAME_USD ? 'exact' : v !== 0 && gap < REAL_TOLERANCE * Math.abs(v) ? 'near' : null;
+    }
+    if (!kind) continue;
+    const last = out[out.length - 1];
+    if (last && last.to === j - 1 && last.kind === kind) last.to = j; else out.push({ from: j, to: j, kind });
+  }
+  return out;
 }
 /** Live ticks move today's point of the real line together with the last candle. */
 function updateRealLineTail() {
@@ -1115,10 +1170,21 @@ function soloLegend(b) {
   return `<br><span style="color:#f0b429">PMC ${fmtPrice(pmc)}</span> · <span class="muted">prezzo</span> <span class="num">${fmtPrice(px)}</span>` +
     ` · <span class="muted">sul PMC</span> <span class="num ${cls(px - pmc)}">${fmtPct(px / pmc - 1)}</span>`;
 }
-/** In "current positions" mode: the day from which the chart is the real value of the view. */
+/** In "current positions" mode: the day from which the chart is the real value of the view, or close to it. */
 function exactSinceText() {
+  const ranges = state.agg.length ? realMatchRanges() : null;
+  if (ranges && ranges.length) {
+    // the bands that reach today: the exact one, then the near ones right before it
+    let k = ranges.length - 1;
+    const parts = [];
+    if (ranges[k].kind === 'exact') { parts.push(`uguale al reale dal ${fmtBarDay(state.agg[ranges[k].from].t)}`); }
+    let from = ranges[k].from;
+    while (k > 0 && ranges[k - 1].to === from - 1) from = ranges[--k].from;
+    if (!parts.length || from < ranges[ranges.length - 1].from) parts.push(`entro ${Math.round(REAL_TOLERANCE * 100)}%${parts.length ? '' : ' del reale'} dal ${fmtBarDay(state.agg[from].t)}`);
+    return `</b> <span class="muted">· ${parts.join(' · ')}</span><b>`;
+  }
   const d = positionsExactSince();
-  return d ? `</b> <span class="muted">· uguale al reale dal ${new Date(localDayTs(d) * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' })}</span><b>` : '';
+  return d ? `</b> <span class="muted">· uguale al reale dal ${fmtBarDay(localDayTs(d))}</span><b>` : '';
 }
 function legendTitle() {
   if (state.scope === 'custom') {
