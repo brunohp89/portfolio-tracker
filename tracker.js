@@ -2,7 +2,17 @@
 /* ------------------------------------------------------------------ time zone
    Top-level, so the tracker and the loader below share it (classic scripts share the global scope). */
 /** Device time zone: on a phone it follows the location when the clock is set automatically. */
-const deviceTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
+// Reading it builds an Intl formatter (~50 µs) and every bar's time conversion asks for it (TZ() is the
+// default argument of tzOffset), so it is read at most once a second; tickClock still notices a change.
+let deviceTzValue = '', deviceTzAt = 0;
+const deviceTz = () => {
+  const now = Date.now();
+  if (!deviceTzValue || now - deviceTzAt >= 1000) {
+    try { deviceTzValue = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { deviceTzValue = 'UTC'; }
+    deviceTzAt = now;
+  }
+  return deviceTzValue;
+};
 function validTz(z) {
   if (!z || typeof z !== 'string') return '';
   try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch { return ''; }
@@ -59,6 +69,25 @@ for (const el of document.querySelectorAll('[data-label-title]')) el.title = el.
 'use strict';
 const LWC = window.LightweightCharts;
 const $ = (id) => document.getElementById(id);
+/*
+ * Writes that skip the DOM when nothing changed. The KPIs are redrawn on every price tick (up to four
+ * times a second) and most of their markup is the same each time; an identical write still makes the
+ * browser parse, restyle and lay out again. setHtml also checks that the node it wrote is still there,
+ * so a direct write elsewhere (textContent, innerHTML) is never mistaken for "unchanged".
+ */
+const htmlWritten = new WeakMap();
+function setHtml(el, html) {
+  const w = htmlWritten.get(el);
+  if (w && w.html === html && w.first === el.firstChild && w.last === el.lastChild) return;
+  el.innerHTML = html;
+  htmlWritten.set(el, { html, first: el.firstChild, last: el.lastChild });
+}
+function setText(el, text) {
+  const n = el.firstChild;
+  const same = text === '' ? !n : n && n === el.lastChild && n.nodeType === 3 && n.data === text;
+  if (!same) el.textContent = text;
+}
+function setTitle(el, title) { if (el.title !== title) el.title = title; }
 
 /* ------------------------------------------------------------------ storage */
 const store = {
@@ -768,6 +797,9 @@ const chart = LWC.createChart($('chart'), {
   rightPriceScale: { borderColor: '#262d3d', scaleMargins: { top: 0.12, bottom: 0.08 } },
   timeScale: { borderColor: '#262d3d', timeVisible: true, secondsVisible: false, rightOffset: 4 },
   crosshair: { mode: LWC.CrosshairMode.Normal },
+  // On a phone the chart fills most of the screen: a vertical swipe on it scrolls the page, a
+  // horizontal one still pans the chart.
+  handleScroll: { vertTouchDrag: false },
   localization: { priceFormatter: (v) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 }) },
 });
 let mainSeries = null, mainSeriesType = null, contribSeries = null;
@@ -1154,7 +1186,7 @@ function fmtBarTime(t) {
  */
 let legendTime = null;
 function updateLegend() {
-  if (!state.agg.length) { $('legend').innerHTML = ''; return; }
+  if (!state.agg.length) { setHtml($('legend'), ''); return; }
   let idx = state.agg.length - 1;
   if (legendTime != null) {
     const j = state.chartTimes.indexOf(legendTime);
@@ -1165,11 +1197,11 @@ function updateLegend() {
   const ch = b.c - prev;
   const base = state.agg[0].o;
   const k = (lbl, v) => `<span class="muted">${lbl}</span> <span class="num">${fmtUsd(v)}</span>`;
-  $('legend').innerHTML =
+  setHtml($('legend'),
     `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
     [k('A', b.o), k('Max', b.h), k('Min', b.l), k('C', b.c)].join(' &nbsp;') +
     ` &nbsp;<span class="num ${cls(ch)}">${fmtSigned(ch)} (${fmtPct(prev ? ch / prev : 0)})</span>` +
-    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx);
+    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx));
 }
 function soloLegend(b) {
   const p = soloPosition();
@@ -1436,15 +1468,16 @@ function quantileSorted(a, q) {
   const pos = q * (a.length - 1), lo = Math.floor(pos), hi = Math.min(lo + 1, a.length - 1);
   return a[lo] + (a[hi] - a[lo]) * (pos - lo);
 }
-/** ES and VaR (positive numbers, USD) of the market positions in the current view, or null. */
-function esStats() {
-  if (!risk.closes) return null;
-  const all = scopePositions().filter(isMarketPos);
-  const held = all.filter((p) => risk.closes.has(p.symbol) && p.qty);
-  if (!held.length) return null;
-  const missing = all.filter((p) => !risk.closes.has(p.symbol)).map((p) => p.symbol);
-  const cryptoOnly = held.every((p) => p.kind === 'crypto');
+/**
+ * The part of the ES that does not depend on today's prices: the date grid, the forward-filled closes
+ * and each symbol's daily return on every day where all of them have one. It only changes with the
+ * loaded history, the snapshot and the view, so it is kept between calls (esStats runs on every tick).
+ */
+const esCache = { key: null, closes: null, snap: null, base: null };
+function esReturns(held, cryptoOnly) {
   const cut = cryptoOnly ? risk.cutUtc : risk.cutNy;
+  const key = cut + '|' + held.map((p) => p.symbol).join(',');
+  if (esCache.closes === risk.closes && esCache.snap === state.snap && esCache.key === key) return esCache.base;
   const grid = new Set();
   for (const p of held) {
     if (!cryptoOnly && p.kind === 'crypto') continue;
@@ -1463,17 +1496,36 @@ function esStats() {
     }
     return out;
   });
-  const V = held.map((p) => p.qty * (prevOf(p) || priceOf(p)));
-  const pnl = [], days = [];
+  const rets = [], days = [];
   for (let i = 1; i < dates.length; i++) {
-    let v = 0, ok = true;
+    const r = new Array(held.length);
+    let ok = true;
     for (let k = 0; k < held.length; k++) {
       const a = filled[k][i - 1], b = filled[k][i];
       if (a == null || b == null) { ok = false; break; }
-      v += V[k] * (b / a - 1);
+      r[k] = b / a - 1;
     }
-    if (ok) { pnl.push(v); days.push(dates[i]); }
+    if (ok) { rets.push(r); days.push(dates[i]); }
   }
+  Object.assign(esCache, { key, closes: risk.closes, snap: state.snap, base: { rets, days } });
+  return esCache.base;
+}
+/** ES and VaR (positive numbers, USD) of the market positions in the current view, or null. */
+function esStats() {
+  if (!risk.closes) return null;
+  const all = scopePositions().filter(isMarketPos);
+  const held = all.filter((p) => risk.closes.has(p.symbol) && p.qty);
+  if (!held.length) return null;
+  const missing = all.filter((p) => !risk.closes.has(p.symbol)).map((p) => p.symbol);
+  const cryptoOnly = held.every((p) => p.kind === 'crypto');
+  const { rets, days } = esReturns(held, cryptoOnly);
+  const V = held.map((p) => p.qty * (prevOf(p) || priceOf(p)));
+  // Same sum, in the same order, as before the returns were cached: the results are identical.
+  const pnl = rets.map((r) => {
+    let v = 0;
+    for (let k = 0; k < r.length; k++) v += V[k] * r[k];
+    return v;
+  });
   const n = Math.min(pnl.length, ES_LOOKBACK);
   if (n < ES_MIN_DAYS) return null;
   const tail = pnl.slice(-n), sorted = [...tail].sort((x, y) => x - y);
@@ -1487,28 +1539,28 @@ function renderEs(day) {
   const box = $('k-es-box'), el = $('k-es');
   const st = esStats();
   if (!st || !(st.es > 0)) {
-    el.textContent = '—';
-    box.title = risk.closes ? 'Expected shortfall non disponibile: storico dei prezzi insufficiente per le posizioni di questa vista.'
-      : 'Expected shortfall in calcolo: sto leggendo lo storico giornaliero dei prezzi.';
+    setText(el, '—');
+    setTitle(box, risk.closes ? 'Expected shortfall non disponibile: storico dei prezzi insufficiente per le posizioni di questa vista.'
+      : 'Expected shortfall in calcolo: sto leggendo lo storico giornaliero dei prezzi.');
     return;
   }
   const esTxt = fmtUsd(-st.es);
   if (day < 0) {
     const loss = -day, ratio = loss / st.es;
     const c = ratio >= 1 ? 'down' : loss >= st.var ? 'warn' : '';
-    el.innerHTML = `<span class="${c}">${(ratio * 100).toFixed(0)}%</span> <span class="muted">di ${esTxt}</span>`;
+    setHtml(el, `<span class="${c}">${(ratio * 100).toFixed(0)}%</span> <span class="muted">di ${esTxt}</span>`);
   } else {
-    el.innerHTML = `<span class="muted">ES ${esTxt}</span>`;
+    setHtml(el, `<span class="muted">ES ${esTxt}</span>`);
   }
   const fmtD = (d) => new Date(d + 'T12:00:00Z').toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
-  box.title = [
+  setTitle(box, [
     `Perdita di oggi in percentuale dell'expected shortfall al 95% a 1 giorno: la perdita media nel 5% dei giorni peggiori.`,
     `ES ${esTxt} (${fmtPct(-st.es / st.base)}), VaR 95% ${fmtUsd(-st.var)} (${fmtPct(-st.var / st.base)}).`,
     `Simulazione storica come nel Portfolio Brief: rendimenti giornalieri di ${st.n} ${st.cryptoOnly ? 'giorni di calendario' : 'giorni di borsa'} (${fmtD(st.from)} – ${fmtD(st.to)}) applicati alle posizioni di inizio giornata (${fmtUsd(st.base)}, CD e liquidità esclusi perché senza rischio di prezzo).`,
     `Giallo: perdita oltre il VaR. Rosso: oltre l'ES.`,
     st.cryptoOnly ? '' : `La variazione del giorno parte dalla mezzanotte: nel weekend e nei festivi si muovono solo le crypto, mentre l'ES è su un giorno di borsa intero.`,
     st.missing.length ? `Senza storico, quindi esclusi (ES sottostimato): ${st.missing.join(', ')}.` : '',
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean).join('\n'));
 }
 
 /* ------------------------------------------------------------------ KPIs and table */
@@ -1526,20 +1578,20 @@ function updateKpis() {
   }
   let total = 0;
   for (const p of positions()) total += isMarketPos(p) ? p.qty * priceOf(p) : p.value;
-  $('k-scope-lbl').textContent = SCOPE_LABEL[state.scope];
-  $('k-value').textContent = fmtUsd(value, 2);
+  setText($('k-scope-lbl'), SCOPE_LABEL[state.scope]);
+  setText($('k-value'), fmtUsd(value, 2));
   const eurRate = BOOT.eurRate ? BOOT.eurRate() : null;
-  $('k-value-eur').textContent = eurRate ? fmtEur(value / eurRate) : '';
-  $('k-day').innerHTML = `<span class="${cls(day)}">${fmtSigned(day)} (${fmtPct(prevVal ? day / prevVal : 0)})</span>`;
+  setText($('k-value-eur'), eurRate ? fmtEur(value / eurRate) : '');
+  setHtml($('k-day'), `<span class="${cls(day)}">${fmtSigned(day)} (${fmtPct(prevVal ? day / prevVal : 0)})</span>`);
   renderEs(day);
-  $('k-pnl').innerHTML = `<span class="${cls(pnl)}">${fmtSigned(pnl)} (${fmtPct(value - pnl ? pnl / (value - pnl) : 0)})</span>`;
+  setHtml($('k-pnl'), `<span class="${cls(pnl)}">${fmtSigned(pnl)} (${fmtPct(value - pnl ? pnl / (value - pnl) : 0)})</span>`);
   const realized = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : null;
-  $('k-closed').innerHTML = realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`;
+  setHtml($('k-closed'), realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`);
   renderPnlBreakdown();
   renderIrr();
   renderTwr();
   renderBench();
-  $('k-weight').textContent = total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—';
+  setText($('k-weight'), total ? (value / total * 100).toFixed(1) + '%' + (state.scope === 'all' ? '' : ` di ${fmtUsd(total)}`) : '—');
   renderNetWorth(total);
   document.title = `${fmtUsd(value)} · Portfolio Tracker`;
 }
@@ -1553,10 +1605,10 @@ function renderNetWorth(portfolioTotal) {
   const total = portfolioTotal + bank;
   const eurRate = BOOT.eurRate ? BOOT.eurRate() : null;
   const invested = total > 0 ? `${(portfolioTotal / total * 100).toFixed(1)}% investito` : '';
-  $('k-nw').textContent = fmtUsd(total, 2);
-  $('k-nw-sub').textContent = [eurRate ? fmtEur(total / eurRate) : '', invested].filter(Boolean).join(' · ');
-  box.title = `Investimenti ${fmtUsd(portfolioTotal, 2)} a prezzi in tempo reale (CD e liquidità inclusi) + conti ${fmtUsd(bank, 2)}` +
-    (eurRate ? `. Euro al cambio EURUSD ${eurRate.toFixed(4)}` : '') + (invested ? `. Quota investita: ${invested.replace(' investito', '')} del patrimonio` : '');
+  setText($('k-nw'), fmtUsd(total, 2));
+  setText($('k-nw-sub'), [eurRate ? fmtEur(total / eurRate) : '', invested].filter(Boolean).join(' · '));
+  setTitle(box, `Investimenti ${fmtUsd(portfolioTotal, 2)} a prezzi in tempo reale (CD e liquidità inclusi) + conti ${fmtUsd(bank, 2)}` +
+    (eurRate ? `. Euro al cambio EURUSD ${eurRate.toFixed(4)}` : '') + (invested ? `. Quota investita: ${invested.replace(' investito', '')} del patrimonio` : ''));
 }
 /** Closed positions relevant to the current view (all of them are broker lines). */
 function scopeClosed() {
@@ -1574,16 +1626,16 @@ function renderClosed() {
   const rows = [...scopeClosed()].sort((a, b) => Math.abs(b.pnl || 0) - Math.abs(a.pnl || 0));
   const tot = scopeRealized();
   const has = state.snap.closed != null;
-  $('closed-sum').innerHTML = has
+  setHtml($('closed-sum'), has
     ? `Posizioni chiuse · <b>${rows.length}</b> ${rows.length === 1 ? 'linea' : 'linee'} · P&amp;L <b class="${cls(tot)}">${fmtSigned(tot, 2)}</b>`
-    : 'Posizioni chiuse · non presenti in questo snapshot';
-  $('closed-body').innerHTML = rows.length ? rows.map((c) => `<tr>
+    : 'Posizioni chiuse · non presenti in questo snapshot');
+  setHtml($('closed-body'), rows.length ? rows.map((c) => `<tr>
       <td class="l sym">${esc(c.symbol)}</td><td class="num">${fmtQty(c.qty)}</td><td class="num">${fmtUsd(c.proceeds, 2)}</td>
       <td class="num">${fmtUsd(c.cost, 2)}</td><td class="num ${cls(c.pnl)}">${fmtSigned(c.pnl, 2)}</td>
       <td class="num">${c.held ? '<span class="muted">in posizioni</span>' : fmtUsd(c.dividends || 0, 2)}</td>
       <td class="num">${c.held ? '<span class="muted">in posizioni</span>' : fmtUsd(c.interest || 0, 2)}</td>
       <td class="num">${esc(c.last || '—')}</td></tr>`).join('')
-    : `<tr><td class="l muted" colspan="8">${has ? 'Nessuna posizione chiusa in questa vista' : 'Importa uno snapshot recente per vederle'}</td></tr>`;
+    : `<tr><td class="l muted" colspan="8">${has ? 'Nessuna posizione chiusa in questa vista' : 'Importa uno snapshot recente per vederle'}</td></tr>`);
 }
 /**
  * P&L components for the current view. Open P&L is live; the rest comes from the brief.
@@ -1624,20 +1676,20 @@ function renderPnlBreakdown() {
   // Return base: net contributions for the whole portfolio, otherwise the cost basis of open plus closed lines.
   const base = contrib || invested;
   const baseLbl = contrib ? 'sui versamenti netti' : 'sul costo investito (posizioni aperte + chiuse)';
-  $('k-total').innerHTML = `<span class="${cls(total)}">${fmtSigned(total)}${base ? ` (${fmtPct(total / base)})` : ''}</span>`;
-  $('k-total').parentElement.title = (complete ? 'P&L aperto + P&L chiuso + dividendi + interessi − commissioni'
+  setHtml($('k-total'), `<span class="${cls(total)}">${fmtSigned(total)}${base ? ` (${fmtPct(total / base)})` : ''}</span>`);
+  setTitle($('k-total').parentElement, (complete ? 'P&L aperto + P&L chiuso + dividendi + interessi − commissioni'
     : 'Le commissioni sono per conto, non per titolo: nella selezione di simboli sono escluse') +
-    (base ? `\nPercentuale ${baseLbl}: ${fmtUsd(base)}` : '');
+    (base ? `\nPercentuale ${baseLbl}: ${fmtUsd(base)}` : ''));
   const gross = parts.reduce((s, x) => s + (x.v != null && isFinite(x.v) ? Math.abs(x.v) : 0), 0) || 1;
-  $('pnl-bar').innerHTML = parts.filter((x) => x.v != null && isFinite(x.v) && x.v !== 0)
-    .map((x) => `<span title="${x.l}: ${fmtSigned(x.v, 2)}" style="width:${(Math.abs(x.v) / gross * 100).toFixed(2)}%;background:${x.c};opacity:${x.v < 0 ? 0.55 : 1}"></span>`).join('');
+  setHtml($('pnl-bar'), parts.filter((x) => x.v != null && isFinite(x.v) && x.v !== 0)
+    .map((x) => `<span title="${x.l}: ${fmtSigned(x.v, 2)}" style="width:${(Math.abs(x.v) / gross * 100).toFixed(2)}%;background:${x.c};opacity:${x.v < 0 ? 0.55 : 1}"></span>`).join(''));
   const share = (v) => total ? (v / total * 100).toFixed(1).replace('-', '−') + '%' : '—';
-  $('pnl-items').innerHTML = parts.map((x) => {
+  setHtml($('pnl-items'), parts.map((x) => {
     const ok = x.v != null && isFinite(x.v);
     return `<span class="it"><span class="sw" style="background:${x.c}"></span><span class="muted">${x.l}</span>
       <span class="num ${ok ? cls(x.v) : ''}">${ok ? fmtSigned(x.v) : (x.k === 'fees' && state.scope === 'custom' ? 'non attribuibili' : '—')}</span>
       <span class="num muted">${ok ? share(x.v) : ''}</span></span>`;
-  }).join('') + `<span class="it eq">= <b class="num ${cls(total)}">${fmtSigned(total)}</b>${complete ? '' : ' <span class="muted">(senza commissioni)</span>'}</span>`;
+  }).join('') + `<span class="it eq">= <b class="num ${cls(total)}">${fmtSigned(total)}</b>${complete ? '' : ' <span class="muted">(senza commissioni)</span>'}</span>`);
 }
 /* ------------------------------------------------------------------ money-weighted return (XIRR) */
 const DAY_MS = 86400000;
@@ -1712,22 +1764,22 @@ function renderIrr() {
   const ref = m && refKey && m[refKey] != null && isFinite(m[refKey]) ? m[refKey] : null;
   const refAsof = (m && m.asof) || state.snap.asof;
   if (st.why) {
-    el.innerHTML = ref == null ? '—' : `<span class="${cls(ref)}">${fmtPct(ref)}</span><span class="muted">/anno al ${esc(refAsof)}</span>`;
-    box.title = st.why + (ref == null ? '' : `\nValore del Portfolio Brief al ${refAsof}, non aggiornato con i prezzi live`);
+    setHtml(el, ref == null ? '—' : `<span class="${cls(ref)}">${fmtPct(ref)}</span><span class="muted">/anno al ${esc(refAsof)}</span>`);
+    setTitle(box, st.why + (ref == null ? '' : `\nValore del Portfolio Brief al ${refAsof}, non aggiornato con i prezzi live`));
     return;
   }
   const short = st.years < 1;
-  el.innerHTML = st.r == null ? '—'
+  setHtml(el, st.r == null ? '—'
     : `<span class="${cls(st.r)}">${fmtPct(st.r)}</span><span class="muted">/anno${short ? ' (meno di 1 anno)' : ''}</span>` +
-      (ref == null ? '' : ` <span class="muted">· brief ${fmtPct(ref)}</span>`);
-  box.title = [
+      (ref == null ? '' : ` <span class="muted">· brief ${fmtPct(ref)}</span>`));
+  setTitle(box, [
     'Tasso interno di rendimento (money-weighted): il tasso annuo a cui versamenti e prelievi, ciascuno alla sua data, valgono oggi quanto il portafoglio. Pesa di più i periodi in cui c\'era più denaro investito.',
     `Dal ${st.first} (${st.years.toFixed(1).replace('.', ',')} anni) · ${st.n} ${st.n === 1 ? 'flusso' : 'flussi'} · versato netto ${fmtUsd(st.net)} · valore oggi ${fmtUsd(st.value)}`,
     'Il valore include liquidità e CD anche se nascosti. Fonte dei flussi: ' + st.src + '.',
     ref == null ? '' : `Portfolio Brief al ${refAsof}: ${fmtPct(ref)}/anno (prezzi di chiusura di quel giorno).`,
     short ? 'Su meno di un anno il tasso annualizzato amplifica le oscillazioni: va letto con cautela.' : '',
     st.r == null ? 'Nessun tasso tra −99% e +500% annuo azzera i flussi.' : '',
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean).join('\n'));
 }
 /* ------------------------------------------------------------------ time-weighted return (TWR) */
 /** Value series of the current view from the snapshot's daily history; null when the history cannot isolate it. */
@@ -1824,16 +1876,16 @@ function twrStats() {
 function renderTwr() {
   const el = $('k-twr'), box = el.parentElement;
   const t = twrStats();
-  if (t.why) { el.textContent = '—'; box.title = t.why; return; }
-  el.innerHTML = t.ann == null
+  if (t.why) { setText(el, '—'); setTitle(box, t.why); return; }
+  setHtml(el, t.ann == null
     ? `<span class="${cls(t.total)}">${fmtPct(t.total)}</span><span class="muted"> totale</span>`
-    : `<span class="${cls(t.ann)}">${fmtPct(t.ann)}</span><span class="muted">/anno${t.years < 1 ? ' (meno di 1 anno)' : ''} · ${fmtPct(t.total, 1)} totale</span>`;
-  box.title = [
+    : `<span class="${cls(t.ann)}">${fmtPct(t.ann)}</span><span class="muted">/anno${t.years < 1 ? ' (meno di 1 anno)' : ''} · ${fmtPct(t.total, 1)} totale</span>`);
+  setTitle(box, [
     'Rendimento time-weighted: quanto avrebbe reso 1 $ investito dal primo giorno e mai toccato. Toglie l\'effetto di versamenti e prelievi, quindi misura la strategia ed è confrontabile con un indice.',
     `Dal ${t.first} (${t.years.toFixed(1).replace('.', ',')} anni) · YTD ${fmtPct(t.ytd, 1)} · 1 anno ${fmtPct(t.y1, 1)}`,
     `Giorno per giorno con il Dietz modificato del brief fino al ${t.lastDate}, poi un ultimo tratto con i prezzi live: ${fmtPct(t.step)}.`,
     'Il valore include liquidità e CD anche se nascosti. I titoli ricevuti in regalo contano come versamento al valore di mercato, come nel brief.',
-  ].join('\n');
+  ].join('\n'));
 }
 /* ------------------------------------------------------------------ benchmark TWR */
 /**
@@ -1869,25 +1921,25 @@ function renderBench() {
   const el = $('k-bench'), box = el.parentElement;
   const t = twrStats(), k = benchStats(t);
   const bm = state.snap.benchmark;
-  $('k-bench-lbl').textContent = bm && bm.weights ? `Benchmark ${Object.keys(bm.weights).join('+')} (TWR)` : 'Benchmark (TWR)';
-  if (k.why) { el.textContent = '—'; box.title = k.why; return; }
+  setText($('k-bench-lbl'), bm && bm.weights ? `Benchmark ${Object.keys(bm.weights).join('+')} (TWR)` : 'Benchmark (TWR)');
+  if (k.why) { setText(el, '—'); setTitle(box, k.why); return; }
   const pt = (x) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + ' pt';
   const diff = t.ann != null && k.ann != null ? t.ann - k.ann : t.total - k.total;
-  el.innerHTML = (k.ann == null
+  setHtml(el, (k.ann == null
     ? `<span class="${cls(k.total)}">${fmtPct(k.total)}</span><span class="muted"> totale</span>`
     : `<span class="${cls(k.ann)}">${fmtPct(k.ann)}</span><span class="muted">/anno · ${fmtPct(k.total, 1)} totale</span>`) +
-    ` <span class="muted">·</span> <span class="${cls(diff)}">${pt(diff)}</span>`;
-  box.title = [
+    ` <span class="muted">·</span> <span class="${cls(diff)}">${pt(diff)}</span>`);
+  setTitle(box, [
     `${k.name}: il benchmark a pari rischio scelto dal Portfolio Brief${k.vol != null ? ` (volatilità a 3 anni ${fmtPct(k.vol, 1).replace('+', '')})` : ''}. Dividendi reinvestiti, nessuna commissione di consulenza.`,
     `Stesso periodo del TWR, dal ${t.first}. Lo scarto colorato è il TWR ${t.ann != null && k.ann != null ? 'annuo ' : ''}della vista meno quello del benchmark: positivo vuol dire che la gestione ha battuto un ETF passivo con rischio simile.`,
     `YTD: vista ${fmtPct(t.ytd, 1)}, benchmark ${fmtPct(k.ytd, 1)} · 1 anno: vista ${fmtPct(t.y1, 1)}, benchmark ${fmtPct(k.y1, 1)}`,
     `Indice del brief fino al ${k.asof}, poi ${k.live ? 'prezzo live di ' + k.tickers : 'ultimo prezzo dello snapshot (prezzo live non ancora arrivato)'}: ${fmtPct(k.step)}.`,
-  ].join('\n');
+  ].join('\n'));
 }
 function updatePeriodKpi() {
-  if (!state.agg.length) { $('k-period').textContent = '—'; return; }
+  if (!state.agg.length) { setText($('k-period'), '—'); return; }
   const a = state.agg[0].o, z = state.agg[state.agg.length - 1].c;
-  $('k-period').innerHTML = `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}</span>`;
+  setHtml($('k-period'), `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}</span>`);
 }
 
 const COLS = [
@@ -1930,7 +1982,7 @@ function renderTable() {
     if (typeof x === 'string' || typeof y === 'string') return dir * String(x).localeCompare(String(y));
     return dir * ((x ?? -Infinity) - (y ?? -Infinity));
   });
-  $('thead').innerHTML = COLS.map((c) => `<th class="${c.cls || ''}" data-k="${c.k}">${c.l}${state.sortKey === c.k ? (state.sortDir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join('');
+  setHtml($('thead'), COLS.map((c) => `<th class="${c.cls || ''}" data-k="${c.k}">${c.l}${state.sortKey === c.k ? (state.sortDir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join(''));
   $('tbody').innerHTML = rows.map((r) => {
     const sel = state.scope === 'custom' ? `<input type="checkbox" data-sym="${esc(r.symbol)}" ${state.custom.has(r.symbol) ? 'checked' : ''}>` : '';
     const srcLbl = { live: 'live', poll: 'Yahoo', snapshot: 'snapshot', fisso: 'fisso' }[r.src] || r.src;
@@ -1949,9 +2001,9 @@ function renderTable() {
   }).join('');
   const tv = rows.filter((r) => !showAll || state.custom.has(r.symbol));
   const sum = (f) => tv.reduce((s, r) => s + (r[f] || 0), 0);
-  $('tfoot').innerHTML = `<tr><td></td><td class="l"><b>Totale</b></td><td class="nm"></td><td></td><td></td>
+  setHtml($('tfoot'), `<tr><td></td><td class="l"><b>Totale</b></td><td class="nm"></td><td></td><td></td>
     <td class="num ${cls(sum('dayUsd'))}">${fmtSigned(sum('dayUsd'))}</td><td class="num ${cls(sum('pnl'))}">${fmtSigned(sum('pnl'))}</td><td></td>
-    <td class="num"><b>${fmtUsd(sum('value'))}</b></td><td></td><td></td></tr>`;
+    <td class="num"><b>${fmtUsd(sum('value'))}</b></td><td></td><td></td></tr>`);
 }
 /** Cheap in-place refresh of prices for the symbols that ticked, with a flash. */
 function flashPrices(syms) {
@@ -1969,7 +2021,9 @@ function flashPrices(syms) {
 const dirty = { table: new Set(), chart: false };
 let flushPending = false, lastTableRender = 0;
 function scheduleFlush() {
-  if (flushPending) return;
+  // In the background nothing is drawn: prices keep arriving into state.live and the dirty marks
+  // wait, then the visibilitychange handler flushes them all at once.
+  if (flushPending || document.hidden) return;
   flushPending = true;
   setTimeout(() => {
     flushPending = false;
@@ -2380,6 +2434,7 @@ function tzChanged() {
   window.dispatchEvent(new Event('pt-tz')); // the loader re-renders the bank accounts
 }
 function tickClock() {
+  if (document.hidden) return; // nothing to show; the visibilitychange handler runs it on return
   if (TZ() !== lastTz) tzChanged(); // automatic mode follows the phone when it changes zone
   $('clock').textContent = new Date().toLocaleTimeString('it-IT', { timeZone: TZ() });
   $('clock-tz').textContent = tzAbbr();
@@ -2399,7 +2454,13 @@ tickClock();
 setInterval(tickClock, 1000);
 // Roll the last bar even when no tick arrives (keeps the time axis honest for idle scopes).
 setInterval(() => { if (scopePositions().some((p) => p.kind === 'crypto')) { dirty.chart = true; scheduleFlush(); } }, 15000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollYahoo(); if (!cbWs || cbWs.readyState > 1) connectCoinbase(); } });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  tickClock();
+  dirty.chart = true; scheduleFlush(); // draw what arrived while in the background
+  pollYahoo();
+  if (!cbWs || cbWs.readyState > 1) connectCoinbase();
+});
 
 $('asof').textContent = `posizioni al ${state.snap.asof}`;
 let embeddedPreview = false;

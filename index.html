@@ -187,6 +187,44 @@ footer a{color:#8fb0ff}
 #wallet-wrap .xed input[inputmode]{width:110px;font-family:var(--mono)}
 #wallet-wrap .xed .bad{color:var(--down)}
 @media (max-width:700px){#wallet-wrap table{font-size:12px}#wallet-wrap td.l{max-width:118px}#wallet-wrap .tag{margin-right:4px}#wallet-wrap .ren{padding-right:3px}#wallet-wrap .last,#wallet-wrap .cr-amt{display:none}#wallet-wrap td,#wallet-wrap th{padding-left:6px;padding-right:6px}#wallet-wrap th .lg{display:none}#wallet-wrap th .sm{display:inline}}
+/* ---- phones (a Galaxy S Ultra is 384-412 CSS px wide) ---- */
+/* Edge-to-edge display (viewport-fit=cover): keep content clear of the status and gesture bars; 0 elsewhere. */
+header{padding-top:calc(10px + env(safe-area-inset-top,0px));padding-left:calc(16px + env(safe-area-inset-left,0px));padding-right:calc(16px + env(safe-area-inset-right,0px))}
+footer{padding-bottom:calc(30px + env(safe-area-inset-bottom,0px))}
+/* The symbol stays in view while the positions table scrolls sideways. */
+td.sym{position:sticky;left:0;z-index:1;background:var(--bg)}
+th[data-k="symbol"]{left:0;z-index:2}
+#tfoot td:nth-child(2){position:sticky;left:0;z-index:1;background:var(--bg)}
+tbody tr:hover td.sym{background:var(--panel)}
+/* The selection column is empty outside "Simboli…": no padding, so it takes no width. */
+#thead th[data-k="sel"]:empty,#tbody td:first-child:empty,#tfoot td:first-child:empty{padding:0}
+@media (max-width:700px){
+  header{gap:8px 10px;padding-top:calc(8px + env(safe-area-inset-top,0px));padding-bottom:8px;padding-left:calc(12px + env(safe-area-inset-left,0px));padding-right:calc(12px + env(safe-area-inset-right,0px))}
+  .pills{gap:6px;margin-left:0}
+  .pill{font-size:11px;padding:2px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  #btn-settings .t{display:none}
+  .kpis{padding:10px 12px 6px}
+  #pnl-break{padding:2px 12px 10px}
+  .toolbar{gap:8px;padding:8px 12px}
+  .sep{display:none}
+  #picker{padding:8px 12px}
+  .tablewrap{padding:0 0 20px}
+  /* The pending line may wrap under the balance, so the accounts table fits without scrolling sideways. */
+  #wallet-wrap .pend{white-space:normal}
+}
+/* Touch screens: bigger targets, and no hover look stuck on the last thing tapped. */
+@media (pointer:coarse){
+  .seg button{padding:7px 11px}
+  .iconbtn{padding:6px 11px}
+  .chk{min-height:32px}
+  .chip{padding:5px 11px}
+}
+@media (hover:none){
+  .seg button:not(.on):hover{color:var(--muted);background:none}
+  tbody tr:hover{background:none}
+  tbody tr:hover td.sym{background:var(--bg)}
+  td.sym:hover{color:inherit}
+}
 </style>
 </head>
 <body>
@@ -198,7 +236,7 @@ footer a{color:#8fb0ff}
     <span class="pill" id="pill-stocks"><span class="dot"></span>Azioni/fondi</span>
     <span class="pill" id="pill-nyse"><span class="mk" id="nyse-dot"></span><span id="nyse-txt">NYSE</span><span class="cd" id="nyse-cd"></span></span>
     <span class="pill" id="pill-clock" title="Fuso orario"><span class="num" id="clock">--:--:--</span><span class="cd" id="clock-tz"></span></span>
-    <button class="iconbtn" id="btn-settings" title="Impostazioni">⚙ Impostazioni</button>
+    <button class="iconbtn" id="btn-settings" title="Impostazioni" aria-label="Impostazioni">⚙<span class="t"> Impostazioni</span></button>
   </div>
 </header>
 

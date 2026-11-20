@@ -71,6 +71,11 @@ function refresh() {
     if (!conn) return { ok: false, text: 'Nessun collegamento configurato.' };
     try {
       const r = await download(conn, remote && remote.etag);
+      // The same file sent again (no 304: Cloudflare turns the ETag weak when it compresses the answer)
+      // is not news: applying it would reset live prices, price history, the WebSockets and the chart.
+      if (r.changed && remote && JSON.stringify(r.snap) === JSON.stringify(remote.snap)) {
+        remote.etag = r.etag; r.changed = false;
+      }
       if (!r.changed) {
         remote.checkedAt = Date.now(); write(LS.remote, remote);
         return { ok: true, text: `Nessuna novità: lo snapshot è ancora quello al ${remote.snap.asof}.` };

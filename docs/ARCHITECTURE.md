@@ -147,11 +147,18 @@ Engine facts worth knowing (from the plugin README):
    Both stay in this browser (`localStorage` keys `pt.conn`, plus a copy of the last snapshot in
    `pt.remote` to open offline).
 2. `GET /snapshot` with `Authorization: Bearer <TOKEN>` and `If-None-Match`; the Worker answers
-   `304` when the Drive file did not change.
+   `304` when the Drive file did not change. Cloudflare marks the ETag weak (`W/"..."`) when it
+   compresses the answer, which the deployed Worker's exact comparison does not match, so the file
+   usually comes back whole: a `200` carrying the same snapshot as the cached one is treated as
+   unchanged (applying it would reset live prices, price history, WebSockets and the chart).
 3. Rechecks when the app returns to the foreground after 10 minutes, and every 30 minutes while
    visible. A snapshot whose `config` changed reloads the page.
 4. `sw.js` caches only the same-origin app shell (network first, 2.5 s timeout); every
    cross-origin call (prices, Worker) always goes to the network.
+5. In the background nothing is drawn: prices keep arriving into memory, the clock, KPIs, table and
+   chart wait, and everything is redrawn at once when the app comes back to the foreground. KPI
+   writes that would not change the page are skipped, and the price-independent part of the
+   expected shortfall is cached per history load and view.
 
 ### 4.2 Live prices
 
