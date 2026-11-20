@@ -165,6 +165,17 @@ Engine facts worth knowing (from the plugin README):
 KPIs (value, day change, open/closed/total P&L, XIRR, TWR, benchmark TWR) are recomputed from
 positions × live prices plus the brief's flows and history in the snapshot.
 
+**Loss vs expected shortfall.** Next to the day change, "Perdita / ES 95%" shows a losing day as a
+share of the one-day 95% expected shortfall of the current view (yellow beyond the VaR, red beyond
+the ES; on a positive day only the ES). Same method as the brief's `hist_es95_1d`, computed in the
+browser because the snapshot does not carry it: daily closes of every market position over the last
+420 days (Yahoo, Coinbase for crypto), the last 250 days on which every symbol has a return, applied
+to the values at the start of the day (qty × reference price of the day change); ES = mean P&L at or
+below the 5% quantile (numpy's linear quantile). The grid is New York trading days, with crypto at
+its UTC close of the same date; a crypto-only view uses calendar days. Days not yet closed are left
+out, and the history is read again when the New York or UTC date changes. CDs and cash carry no price
+risk; positions without history are listed in the tooltip as excluded.
+
 **Time zone.** Midnight (start of daily and weekly candles, the day's change, the day rollover) and
 every time shown follow one time zone: the device's by default (on a phone it follows the location
 when the clock is set automatically, and the app picks up a change within a second), or one chosen

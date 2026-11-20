@@ -1392,6 +1392,125 @@ function applyLiveToChart() {
   updatePeriodKpi();
 }
 
+/* ------------------------------------------------------------------ risk: expected shortfall */
+/*
+ * One-day historical expected shortfall at 95%, the same method as the Portfolio Brief
+ * (analytics.risk, var_lookback_days 250): daily simple returns of every symbol over the last
+ * 250 days in which all of them have a price, applied to the values at the start of today
+ * (qty x reference price of the day change); ES = mean of the P&L at or below the 5% quantile.
+ * The grid is New York trading days when the view holds stocks or funds (crypto takes its UTC
+ * close of that date), calendar days when it holds crypto only, which trades on weekends too.
+ * Days not yet closed when the history was read are left out.
+ */
+const ES_LOOKBACK = 250, ES_ALPHA = 0.05, ES_MIN_DAYS = 60, ES_FETCH_DAYS = 420;
+const utcDate = (tSec) => new Date(tSec * 1000).toISOString().slice(0, 10);
+// cut*: dates the loaded closes stop before; want*: dates of the latest load, finished or still running.
+const risk = { seq: 0, cutNy: null, cutUtc: null, wantNy: null, wantUtc: null, closes: null };
+/** Daily closes of every market position, keyed by date (UTC date of the bar: equal to the New York date for stocks and funds). */
+async function loadRiskHistory() {
+  const seq = ++risk.seq;
+  const now = nowSec();
+  const cutNy = nyParts(now).date, cutUtc = utcDate(now);
+  risk.wantNy = cutNy; risk.wantUtc = cutUtc;
+  const list = positions().filter(isMarketPos);
+  const res = await Promise.allSettled(list.map((p) => getBars(p, '1d', now - ES_FETCH_DAYS * 86400, now)));
+  if (seq !== risk.seq) return; // a newer load (snapshot, day rollover) is in flight
+  const closes = new Map();
+  list.forEach((p, i) => {
+    const r = res[i];
+    const bars = r.status === 'fulfilled' ? r.value.bars : [];
+    if (!bars.length) return;
+    const m = new Map();
+    for (const b of bars) if (isFinite(b.c) && b.c > 0) m.set(utcDate(b.t), b.c);
+    closes.set(p.symbol, m);
+  });
+  Object.assign(risk, { cutNy, cutUtc, closes });
+  scheduleFlush();
+}
+/** Reload when a day closes: a new New York date (trading grid) or a new UTC date (crypto closes). */
+function riskStale(tSec = nowSec()) {
+  return risk.wantNy != null && (nyParts(tSec).date !== risk.wantNy || utcDate(tSec) !== risk.wantUtc);
+}
+/** numpy.quantile with the default linear interpolation, on an ascending array. */
+function quantileSorted(a, q) {
+  const pos = q * (a.length - 1), lo = Math.floor(pos), hi = Math.min(lo + 1, a.length - 1);
+  return a[lo] + (a[hi] - a[lo]) * (pos - lo);
+}
+/** ES and VaR (positive numbers, USD) of the market positions in the current view, or null. */
+function esStats() {
+  if (!risk.closes) return null;
+  const all = scopePositions().filter(isMarketPos);
+  const held = all.filter((p) => risk.closes.has(p.symbol) && p.qty);
+  if (!held.length) return null;
+  const missing = all.filter((p) => !risk.closes.has(p.symbol)).map((p) => p.symbol);
+  const cryptoOnly = held.every((p) => p.kind === 'crypto');
+  const cut = cryptoOnly ? risk.cutUtc : risk.cutNy;
+  const grid = new Set();
+  for (const p of held) {
+    if (!cryptoOnly && p.kind === 'crypto') continue;
+    for (const d of risk.closes.get(p.symbol).keys()) if (d < cut) grid.add(d);
+  }
+  const dates = [...grid].sort();
+  // Last close on or before each grid date (forward fill), per symbol.
+  const filled = held.map((p) => {
+    const m = risk.closes.get(p.symbol);
+    const own = [...m.keys()].sort();
+    const out = new Array(dates.length).fill(null);
+    let j = -1;
+    for (let i = 0; i < dates.length; i++) {
+      while (j + 1 < own.length && own[j + 1] <= dates[i]) j++;
+      if (j >= 0) out[i] = m.get(own[j]);
+    }
+    return out;
+  });
+  const V = held.map((p) => p.qty * (prevOf(p) || priceOf(p)));
+  const pnl = [], days = [];
+  for (let i = 1; i < dates.length; i++) {
+    let v = 0, ok = true;
+    for (let k = 0; k < held.length; k++) {
+      const a = filled[k][i - 1], b = filled[k][i];
+      if (a == null || b == null) { ok = false; break; }
+      v += V[k] * (b / a - 1);
+    }
+    if (ok) { pnl.push(v); days.push(dates[i]); }
+  }
+  const n = Math.min(pnl.length, ES_LOOKBACK);
+  if (n < ES_MIN_DAYS) return null;
+  const tail = pnl.slice(-n), sorted = [...tail].sort((x, y) => x - y);
+  const q = quantileSorted(sorted, ES_ALPHA);
+  const worst = sorted.filter((x) => x <= q);
+  const es = -worst.reduce((s, x) => s + x, 0) / worst.length;
+  return { es, var: -q, n, from: days[days.length - n], to: days[days.length - 1], base: V.reduce((s, x) => s + x, 0), cryptoOnly, missing };
+}
+/** Today's loss as a share of the expected shortfall, next to the day change. */
+function renderEs(day) {
+  const box = $('k-es-box'), el = $('k-es');
+  const st = esStats();
+  if (!st || !(st.es > 0)) {
+    el.textContent = '—';
+    box.title = risk.closes ? 'Expected shortfall non disponibile: storico dei prezzi insufficiente per le posizioni di questa vista.'
+      : 'Expected shortfall in calcolo: sto leggendo lo storico giornaliero dei prezzi.';
+    return;
+  }
+  const esTxt = fmtUsd(-st.es);
+  if (day < 0) {
+    const loss = -day, ratio = loss / st.es;
+    const c = ratio >= 1 ? 'down' : loss >= st.var ? 'warn' : '';
+    el.innerHTML = `<span class="${c}">${(ratio * 100).toFixed(0)}%</span> <span class="muted">di ${esTxt}</span>`;
+  } else {
+    el.innerHTML = `<span class="muted">ES ${esTxt}</span>`;
+  }
+  const fmtD = (d) => new Date(d + 'T12:00:00Z').toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  box.title = [
+    `Perdita di oggi in percentuale dell'expected shortfall al 95% a 1 giorno: la perdita media nel 5% dei giorni peggiori.`,
+    `ES ${esTxt} (${fmtPct(-st.es / st.base)}), VaR 95% ${fmtUsd(-st.var)} (${fmtPct(-st.var / st.base)}).`,
+    `Simulazione storica come nel Portfolio Brief: rendimenti giornalieri di ${st.n} ${st.cryptoOnly ? 'giorni di calendario' : 'giorni di borsa'} (${fmtD(st.from)} – ${fmtD(st.to)}) applicati alle posizioni di inizio giornata (${fmtUsd(st.base)}, CD e liquidità esclusi perché senza rischio di prezzo).`,
+    `Giallo: perdita oltre il VaR. Rosso: oltre l'ES.`,
+    st.cryptoOnly ? '' : `La variazione del giorno parte dalla mezzanotte: nel weekend e nei festivi si muovono solo le crypto, mentre l'ES è su un giorno di borsa intero.`,
+    st.missing.length ? `Senza storico, quindi esclusi (ES sottostimato): ${st.missing.join(', ')}.` : '',
+  ].filter(Boolean).join('\n');
+}
+
 /* ------------------------------------------------------------------ KPIs and table */
 function updateKpis() {
   const scope = scopePositions();
@@ -1412,6 +1531,7 @@ function updateKpis() {
   const eurRate = BOOT.eurRate ? BOOT.eurRate() : null;
   $('k-value-eur').textContent = eurRate ? fmtEur(value / eurRate) : '';
   $('k-day').innerHTML = `<span class="${cls(day)}">${fmtSigned(day)} (${fmtPct(prevVal ? day / prevVal : 0)})</span>`;
+  renderEs(day);
   $('k-pnl').innerHTML = `<span class="${cls(pnl)}">${fmtSigned(pnl)} (${fmtPct(value - pnl ? pnl / (value - pnl) : 0)})</span>`;
   const realized = state.snap.closed != null || isFinite(state.snap.realized) ? scopeRealized() : null;
   $('k-closed').innerHTML = realized == null ? '—' : `<span class="${cls(realized)}">${fmtSigned(realized)}</span>`;
@@ -2078,7 +2198,7 @@ function applySnapshot(snap, persist) {
   for (const s of [...state.custom]) if (!bySym(s)) state.custom.delete(s);
   saveCustom();
   $('asof').textContent = `posizioni al ${snap.asof}`;
-  connectCoinbase(); connectFinnhub(); pollYahoo();
+  connectCoinbase(); connectFinnhub(); pollYahoo(); loadRiskHistory();
   renderToolbar(); renderTable(); updateKpis(); rebuild(true);
 }
 function validateSnapshot(s) {
@@ -2265,6 +2385,7 @@ function tickClock() {
   $('clock-tz').textContent = tzAbbr();
   $('pill-clock').title = `Fuso orario: ${TZ()}` + (tzChoice ? ' (scelto nelle impostazioni)' : ' (automatico, dal dispositivo)') + '. Tocca per cambiarlo.';
   if (dayRef.day != null && dayRef.day !== localMidnight()) { ensureDay(); updateKpis(); renderTable(); rebuild(false); }
+  if (riskStale()) loadRiskHistory();
   const st = marketStatus('equity');
   $('nyse-dot').className = 'mk ' + (st.open ? 'open' : 'closed');
   $('nyse-txt').textContent = st.open ? 'NYSE aperta' : 'NYSE chiusa';
@@ -2297,6 +2418,7 @@ connectCoinbase();
 connectFinnhub();
 pollYahoo();
 loadDayRefs();
+loadRiskHistory();
 rebuild(true);
 if (!proxyUrl('/') && !embeddedPreview) setTimeout(() => { if (!proxyUrl('/')) { const b = $('banner'); if (!b.classList.contains('show')) { b.innerHTML = 'Per i prezzi e lo storico di azioni, ETF e fondi configura il proxy Yahoo in <b>Impostazioni</b> (codice del Worker incluso). Le crypto sono già in tempo reale.'; b.classList.add('show'); } } }, 1500);
 
