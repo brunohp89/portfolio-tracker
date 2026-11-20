@@ -148,9 +148,10 @@ Engine facts worth knowing (from the plugin README):
    `pt.remote` to open offline).
 2. `GET /snapshot` with `Authorization: Bearer <TOKEN>` and `If-None-Match`; the Worker answers
    `304` when the Drive file did not change. Cloudflare marks the ETag weak (`W/"..."`) when it
-   compresses the answer, which the deployed Worker's exact comparison does not match, so the file
-   usually comes back whole: a `200` carrying the same snapshot as the cached one is treated as
-   unchanged (applying it would reset live prices, price history, WebSockets and the chart).
+   compresses the answer and removes it from HTML answers (`/brief`), so the Worker compares
+   `If-None-Match` weakly and also sends the value in `X-File-Version`, which the brief app reads.
+   As a second guard, a `200` carrying the same snapshot as the cached one is treated as unchanged
+   (applying it would reset live prices, price history, WebSockets and the chart).
 3. Rechecks when the app returns to the foreground after 10 minutes, and every 30 minutes while
    visible. A snapshot whose `config` changed reloads the page.
 4. `sw.js` caches only the same-origin app shell (network first, 2.5 s timeout); every
