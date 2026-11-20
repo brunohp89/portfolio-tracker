@@ -38,6 +38,7 @@ header .asof{color:var(--muted)}
 .kpi .val{font-size:15px}
 .kpi.big .val{font-size:26px;font-weight:600}
 .kpi .sub{font-size:12px;color:var(--muted);margin-top:1px;min-height:1em}
+.kpi .val .warn{color:var(--warn)}
 .toolbar{display:flex;gap:10px;padding:8px 16px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--line)}
 .seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{background:none;border:0;padding:5px 10px;cursor:pointer;color:var(--muted);border-right:1px solid var(--line)}
@@ -207,6 +208,7 @@ footer a{color:#8fb0ff}
   <div class="kpi big" id="k-nw-box" hidden><div class="lbl">Patrimonio totale</div><div class="val num" id="k-nw">—</div><div class="sub num" id="k-nw-sub"></div></div>
   <div class="kpi big"><div class="lbl" id="k-scope-lbl">Valore</div><div class="val num" id="k-value">—</div><div class="sub num" id="k-value-eur"></div></div>
   <div class="kpi" title="Dalla mezzanotte (nel fuso orario scelto), come la candela giornaliera"><div class="lbl">Variazione giorno</div><div class="val num" id="k-day">—</div></div>
+  <div class="kpi" id="k-es-box"><div class="lbl">Perdita / ES 95%</div><div class="val num" id="k-es">—</div></div>
   <div class="kpi"><div class="lbl">P&amp;L aperto</div><div class="val num" id="k-pnl">—</div></div>
   <div class="kpi" title="P&amp;L realizzato su vendite e scadenze, dal Portfolio Brief (non include dividendi e interessi)"><div class="lbl">P&amp;L chiuso</div><div class="val num" id="k-closed">—</div></div>
   <div class="kpi" title="P&amp;L aperto + P&amp;L chiuso + dividendi + interessi − commissioni"><div class="lbl">P&amp;L totale</div><div class="val num" id="k-total">—</div></div>
