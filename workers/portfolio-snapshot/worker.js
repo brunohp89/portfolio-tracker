@@ -126,8 +126,12 @@ export default {
       const spec = ROUTES[path];
       const file = await latestFile(env, fileName(env, spec), true);
       const etag = `"${file.id}-${file.md5Checksum || file.modifiedTime}"`;
-      const headers = { ...cors, ETag: etag, "Last-Modified": new Date(file.modifiedTime).toUTCString() };
-      if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers });
+      // Cloudflare turns the ETag weak (W/"...") when it compresses the answer and drops it from HTML
+      // answers, so the same value also travels in X-File-Version, which nothing rewrites. If-None-Match
+      // uses the weak comparison (RFC 9110, 13.1.2): with or without W/, the same value means 304.
+      const headers = { ...cors, ETag: etag, "X-File-Version": etag, "Last-Modified": new Date(file.modifiedTime).toUTCString() };
+      const known = (request.headers.get("If-None-Match") || "").split(",").map((v) => v.trim().replace(/^W\//, ""));
+      if (known.includes(etag)) return new Response(null, { status: 304, headers });
       if (Number(file.size) > MAX_BYTES) throw new HttpError(502, "file_too_large");
       const body = await downloadFile(env, file.id);
       if (spec.json) {
@@ -154,7 +158,7 @@ function corsHeaders(request, env) {
     "Access-Control-Allow-Origin": allowed,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, If-None-Match, Content-Type",
-    "Access-Control-Expose-Headers": "ETag, Last-Modified",
+    "Access-Control-Expose-Headers": "ETag, Last-Modified, X-File-Version",
     "Access-Control-Max-Age": "86400",
     "Cache-Control": "private, no-store",
     Vary: "Origin",
