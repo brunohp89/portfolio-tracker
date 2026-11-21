@@ -797,11 +797,30 @@ const chart = LWC.createChart($('chart'), {
   rightPriceScale: { borderColor: '#262d3d', scaleMargins: { top: 0.12, bottom: 0.08 } },
   timeScale: { borderColor: '#262d3d', timeVisible: true, secondsVisible: false, rightOffset: 4 },
   crosshair: { mode: LWC.CrosshairMode.Normal },
-  // On a phone the chart fills most of the screen: a vertical swipe on it scrolls the page, a
-  // horizontal one still pans the chart.
+  // On a phone the chart fills most of the screen: a vertical one-finger swipe on the plot scrolls
+  // the page, a horizontal one still pans the chart. See chartTouch below for the exceptions.
   handleScroll: { vertTouchDrag: false },
   localization: { priceFormatter: (v) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 }) },
 });
+/*
+ * The library uses vertTouchDrag for the price axis too: with it off, dragging the Y axis to stretch
+ * it scrolls the page instead. It decides on the first movement of a gesture, so a gesture that starts
+ * on the price axis, or uses two fingers, turns it back on (capture phase, before the chart's own
+ * listeners) and the chart behaves as it always did; it goes off again when every finger is lifted.
+ */
+(function chartTouch() {
+  const box = $('chart');
+  let grabbed = false;
+  const grab = (on) => { if (on !== grabbed) { grabbed = on; chart.applyOptions({ handleScroll: { vertTouchDrag: on } }); } };
+  box.addEventListener('touchstart', (e) => {
+    const r = box.getBoundingClientRect();
+    const axisLeft = r.right - chart.priceScale('right').width();
+    if (e.touches.length >= 2 || [...e.touches].some((t) => t.clientX >= axisLeft)) grab(true);
+  }, { capture: true, passive: true });
+  const release = (e) => { if (!e.touches.length) grab(false); };
+  box.addEventListener('touchend', release, { capture: true, passive: true });
+  box.addEventListener('touchcancel', release, { capture: true, passive: true });
+})();
 let mainSeries = null, mainSeriesType = null, contribSeries = null;
 
 function makeMainSeries() {

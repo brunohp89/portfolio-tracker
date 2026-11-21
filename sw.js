@@ -2,7 +2,7 @@
 // Only same-origin files are cached. Prices, the snapshot and every other cross-origin
 // request go straight to the network, so nothing private or stale is served from here.
 // Bump CACHE when shipping a change that must drop previously cached files.
-const CACHE = "tracker-shell-v3";
+const CACHE = "tracker-shell-v4";
 const SHELL = ["./", "./index.html", "./lightweight-charts.js", "./tracker.js", "./loader.js", "./manifest.json", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png"];
 const NETWORK_TIMEOUT_MS = 2500;
 
