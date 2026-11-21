@@ -320,8 +320,11 @@ Pending guards (Worker, per Plaid account):
 1. **Dedupe (acts):** a pending transaction named by a posted one in `pending_transaction_id` is
    ignored. This is the only rule that removes a pending item, because it rests on an explicit link.
 2. **Bank cross-check (reports only):** the computed balance is compared with the bank's figure that
-   should include pending items (credit: `limit - available`; depository: `available`). Outcome per
-   account: `ok` (check mark: the figures agree), `differs` ("?": they disagree), `unverified` (no
+   should include pending items (credit: posted balance minus what the bank holds, `(limit -
+   available) - posted debt`, which stays right for a card in credit, whose available credit ignores
+   the credit balance; until 2026-11-21 it used `-(limit - available)`, which flagged every card in
+   credit with "?"; depository: `available`). Outcome per account: `ok` (check mark: the figures
+   agree), `differs` ("?": they disagree), `inferred` (≈: unlisted holds were added), `unverified` (no
    available balance from the bank). It never changes the balance. An earlier version clamped the
    balance to the bank figure; it was withdrawn on 2026-11-16 because one card issuer's balances via Plaid
    report `available` without pending items, which made a real pending authorization disappear.

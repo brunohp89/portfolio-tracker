@@ -820,20 +820,21 @@ function plaidAccount(a, item, pend, pendingKnown, lastDate) {
   // Whatever exceeds the listed pending items, even by a cent, is counted as pending too and reported
   // apart (pending.unlisted), since it is inferred from the available credit, not from a transaction.
   let unlisted = 0;
-  if (isCredit && b.limit != null && b.available != null && pendingKnown) {
-    const held = Number(b.limit) - Number(b.available) - Math.max(0, -posted);
+  const held = isCredit && b.limit != null && b.available != null ? Number(b.limit) - Number(b.available) - Math.max(0, -posted) : null;
+  if (held != null && pendingKnown) {
     const extra = round2(held - out);
     if (extra >= 0.01) unlisted = extra;
   }
   const computed = round2(posted - out - unlisted);
   // Guard 2 (report only): compare with the bank's own figure that should include pending items
-  // (credit: limit - available; depository: available). Balances alone cannot tell "the bank already
+  // (credit: posted balance minus what the bank holds on the available credit, which also holds for a
+  // card in credit, whose available credit ignores the credit balance; depository: available). Balances alone cannot tell "the bank already
   // counts this pending" from "the bank's available figure ignores pending" (some card issuers do the
   // latter), so a listed pending is never removed here: a mismatch is only reported. Pending items
   // are dropped solely on hard evidence, i.e. guard 1 (pending_transaction_id).
   let implied = null;
   if (isCredit) {
-    if (b.limit != null && b.available != null) implied = -(Number(b.limit) - Number(b.available));
+    if (held != null) implied = posted - held;
   } else if (b.available != null) {
     implied = Number(b.available);
   }
