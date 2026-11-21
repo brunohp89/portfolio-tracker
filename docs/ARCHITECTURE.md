@@ -1,6 +1,6 @@
 # Portfolio system: architecture and data flows
 
-Status as of 2026-11-16. This document describes how the Portfolio Brief, the Portfolio Tracker
+Status as of 2026-11-18. This document describes how the Portfolio Brief, the Portfolio Tracker
 PWA, the two Cloudflare Workers and the external data sources fit together. It lists secret
 **names** and where they live, never their values.
 
@@ -10,7 +10,7 @@ PWA, the two Cloudflare Workers and the external data sources fit together. It l
 |---|---|---|---|
 | **Portfolio Brief** | Daily analysis of the brokerage account plus BTC and ETH wallets: valuation, P&L, XIRR/TWR, VaR, projections, PDF/XLSX | Claude scheduled task "Daily portfolio brief", every day at 00:00 America/New_York (fires a few minutes later) | Claude plugin `portfolio-brief` v0.9.1, skill `daily-brief`, Python engine in `skills/daily-brief/scripts/engine` |
 | **Brief artifact** | The published Portfolio Brief dashboard on claude.ai; also stores the ledger cache (`ledger_cache_v2.wasm`, xz JSON) | claude.ai | written by the brief |
-| **Portfolio Tracker** | Live PWA: positions at real-time prices, charts, returns, bank accounts and net worth | GitHub Pages (static, holds no data) | this repo: `index.html`, `sw.js`, `manifest.json` |
+| **Portfolio Tracker** | Live PWA: positions at real-time prices, charts, returns, bank accounts and net worth | GitHub Pages (static, holds no data) | this repo: `index.html` (markup, styles, CSP, a hashed loader script), `tracker.js` (positions, charts, returns), `loader.js` (connection, snapshot, bank accounts, Plaid), `sw.js`, `manifest.json` |
 | **Portfolio Brief app** | Static page that shows the latest `portfolio_brief.html` | GitHub Pages, separate repository (not covered in detail here) | separate repo |
 | **Worker `portfolio-snapshot`** | Authenticated backend of both apps: Drive files, bank balances (Wallet + Plaid), Plaid linking | Cloudflare Workers (free plan) | `workers/portfolio-snapshot/worker.js` |
 | **Worker `yahoo-proxy`** | CORS proxy for Yahoo Finance `/v8/finance/chart` and `/v8/finance/spark` only | Cloudflare Workers | source embedded in `index.html` (`#worker-src`) |
@@ -147,11 +147,19 @@ Engine facts worth knowing (from the plugin README):
    Both stay in this browser (`localStorage` keys `pt.conn`, plus a copy of the last snapshot in
    `pt.remote` to open offline).
 2. `GET /snapshot` with `Authorization: Bearer <TOKEN>` and `If-None-Match`; the Worker answers
-   `304` when the Drive file did not change.
+   `304` when the Drive file did not change. Cloudflare marks the ETag weak (`W/"..."`) when it
+   compresses the answer and removes it from HTML answers (`/brief`), so the Worker compares
+   `If-None-Match` weakly and also sends the value in `X-File-Version`, which the brief app reads.
+   As a second guard, a `200` carrying the same snapshot as the cached one is treated as unchanged
+   (applying it would reset live prices, price history, WebSockets and the chart).
 3. Rechecks when the app returns to the foreground after 10 minutes, and every 30 minutes while
    visible. A snapshot whose `config` changed reloads the page.
 4. `sw.js` caches only the same-origin app shell (network first, 2.5 s timeout); every
    cross-origin call (prices, Worker) always goes to the network.
+5. In the background nothing is drawn: prices keep arriving into memory, the clock, KPIs, table and
+   chart wait, and everything is redrawn at once when the app comes back to the foreground. KPI
+   writes that would not change the page are skipped, and the price-independent part of the
+   expected shortfall is cached per history load and view.
 
 ### 4.2 Live prices
 
@@ -164,6 +172,17 @@ Engine facts worth knowing (from the plugin README):
 
 KPIs (value, day change, open/closed/total P&L, XIRR, TWR, benchmark TWR) are recomputed from
 positions × live prices plus the brief's flows and history in the snapshot.
+
+**Loss vs expected shortfall.** Next to the day change, "Perdita / ES 95%" shows a losing day as a
+share of the one-day 95% expected shortfall of the current view (yellow beyond the VaR, red beyond
+the ES; on a positive day only the ES). Same method as the brief's `hist_es95_1d`, computed in the
+browser because the snapshot does not carry it: daily closes of every market position over the last
+420 days (Yahoo, Coinbase for crypto), the last 250 days on which every symbol has a return, applied
+to the values at the start of the day (qty × reference price of the day change); ES = mean P&L at or
+below the 5% quantile (numpy's linear quantile). The grid is New York trading days, with crypto at
+its UTC close of the same date; a crypto-only view uses calendar days. Days not yet closed are left
+out, and the history is read again when the New York or UTC date changes. CDs and cash carry no price
+risk; positions without history are listed in the tooltip as excluded.
 
 **Time zone.** Midnight (start of daily and weekly candles, the day's change, the day rollover) and
 every time shown follow one time zone: the device's by default (on a phone it follows the location
@@ -204,16 +223,17 @@ sequenceDiagram
       W->>L: /transactions/refresh (forced reads only, max 1 per 5 min per bank)
     end
     W->>W: drop Investment accounts, map Wallet accounts
+    W->>W: one copy of a joint account seen through two Plaid logins
     W->>W: Plaid accounts replace their Wallet twin (same currency + last 4 digits)
     W->>W: pending guards, totals by currency, USD/EUR totals, credit utilization
     W-->>P: summary (no tokens in it)
   end
-  P->>P: add the local manual account (localStorage pt.extra) to totals
+  P->>P: add the manual accounts ("manual" in /wallet, copy in localStorage pt.extras) to totals
   P->>P: Patrimonio totale = portfolio at live prices (CD and cash included) + accounts total USD
   P->>P: EUR lines under Patrimonio and Valore = USD / EURUSD from /wallet; invested share = portfolio / Patrimonio
 ```
 
-**Private labels:** the public code holds placeholders only. `index.html` uses `BROKER` (display
+**Private labels:** the public code holds placeholders only. `tracker.js` uses `BROKER` (display
 name of the brokerage and the `account` value of its positions in the snapshot) and `BK` (the
 snapshot's field name for its series and flows: `history[BK]`, `history['flow_' + BK]`,
 `flows[BK]`); the broker view's internal key is `broker`. The real values come from `GET /labels`
@@ -267,7 +287,7 @@ Balance rules:
   `/accounts/get` (15 per minute per Item). After a `BALANCE_LIMIT` answer it falls back to
   `/accounts/get` in the same request and suspends real-time reads for that Item for 1 hour. The state
   (last real-time read, block) travels in the shared `plaid:summary` cache, so no extra KV writes.
-  Balance = posted balance (credit: `-current`, depository: `current`) plus the listed pending
+  Balance = posted balance (credit and loan: `-current`, depository: `current`) plus the listed pending
   transactions, then the two guards below. The raw balances of a real-time read are kept in the
   shared cache (never sent to the app) so the transactions can be read again while that read is reused.
 - **Slow banks (soft deadline and background completion):** real-time reads and
@@ -303,7 +323,13 @@ Balance rules:
   the detail). Only done when the transactions were read. Risk: a bank that lowers the available
   credit for other reasons (blocks, payments being processed) shows that amount as pending.
 - **Credit limits:** Plaid's `limit`, overridden by the `CREDIT_LIMITS` secret (keyed by Wallet
-  account name); Wallet's own limit as a last resort.
+  account name); Wallet's own limit as a last resort. The overall utilization under the table is in USD:
+  a EUR card is converted at the EURUSD rate, a card in another currency is left out of it.
+- **Loans:** Plaid `loan` accounts (mortgage, auto, student) are debts: `current` is the principal still
+  owed, so the balance is `-current` (type `Loan`, no credit line, pending check `unverified`).
+- **Joint accounts across Plaid logins:** an account visible from two logins at the same bank is kept
+  once (same institution name, last 4 digits, currency and type, from two different Items); the copy
+  with a real-time balance wins. Two accounts with the same key inside one Item stay separate.
 - **FX:** EURUSD from Yahoo Finance (`EURUSD=X`, last market price), the same source as the brief;
   if Yahoo does not answer, the rate Wallet applied to the latest EUR record (shown as such).
 - **If a Plaid bank fails**, its accounts fall back to the Wallet data and the bank is listed with its
@@ -371,7 +397,9 @@ logins of the household). One more bank is read only through Wallet.
 ### 4.5 Manual accounts and settings
 
 - **Manual accounts** under the Conti table: any number of them (name, amount, USD/EUR, a "±" button
-  for debts), added with the form below the table. In the table, ✎ or a tap on the row opens an
+  for debts), added with the form below the table. Amounts are typed Italian style: the comma is the
+  only decimal separator and dots may only group thousands (`1250,50`, `1.250,50`); anything else,
+  `1250.50` included, is refused with an error message instead of being guessed. In the table, ✎ or a tap on the row opens an
   editor for name, amount and currency, ✕ (in the empty sync column) deletes the account after a
   confirmation. Shared by every device: the Worker keeps them in `PLAID_KV` (`manual`), changes go
   through `POST /accounts/manual` (`upsert` or `delete` of one account, answered with the whole list),
@@ -417,7 +445,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 Elsewhere:
 
 - **Browser `localStorage`:** `pt.conn` (Worker URL + TOKEN), `pt.remote` (last snapshot),
-  `pt.wallet` (last `/wallet` answer), `pt.extra` (manual account), `pt.labels` (private labels), `pt.plaidLink` (link token during
+  `pt.wallet` (last `/wallet` answer), `pt.extras` (copy of the manual accounts), `pt.extrasSynced`, `pt.labels` (private labels), `pt.plaidLink` (link token during
   OAuth), `pt.settings` and other UI preferences.
 - **Snapshot `config`:** Yahoo proxy URL and Finnhub key, written by the brief.
 - **Brief:** `config.json` in the plugin; constants (artifact URL, Drive folder ids) in `SKILL.md`.
@@ -434,6 +462,20 @@ Elsewhere:
   sees them.
 - Wallet fair use: after a 429 the Worker stops calling Wallet for the `Retry-After` time (at least
   60 s) and serves the last answer; forced reads are limited to one a minute on both sides.
+- **XSS:** every string from outside the page (snapshot symbols, names and dates, Worker labels and
+  account names, Yahoo error messages, imported files) is data, never markup. `tracker.js` passes it
+  through `esc()` in every HTML template; `loader.js` builds its DOM with `textContent` only; messages
+  use `textContent`. Keep this rule for new code: the Worker `TOKEN` sits in `localStorage` (`pt.conn`),
+  so script injected into the page could read it.
+- **Content-Security-Policy** (meta tag in `index.html`), the second line of defence: only the small
+  loader script at the end of `index.html` may run, allowed by its SHA-256 hash, and `'strict-dynamic'`
+  extends that trust to the scripts it adds (`lightweight-charts.js`, `tracker.js`, `loader.js`) and to
+  the ones they load (Plaid Link, the XLSX reader from cdnjs). Inline event handlers and `javascript:`
+  URLs injected through data are blocked. Plaid also needs `frame-src` and `img-src` on
+  `cdn.plaid.com`; the service worker needs `worker-src 'self'`. Editing `tracker.js` or `loader.js`
+  needs no CSP change; editing the inline loader script means recomputing its hash
+  (`printf %s "<script body>" | openssl dgst -sha256 -binary | base64`, body = everything between
+  `<script>` and `</script>`), otherwise the page stays blank.
 
 ## 8. Limits and known behaviour
 
@@ -454,12 +496,9 @@ Elsewhere:
 
 ### Open issues (not fixed yet)
 
-- **Joint accounts across Plaid logins:** a joint account visible from two logins (e.g. the two
-  logins at the same bank) is returned twice; only the first copy replaces its Wallet twin, the second is added as
-  a new row and counted twice. Fix: dedupe Plaid accounts by institution + last 4 digits + currency.
-- **Loans:** for Plaid `loan` accounts (mortgage, auto, student) `current` is the amount owed, but
-  `plaidAccount` treats every non-credit account as an asset, so a loan would raise the net worth.
-  Fix: treat `loan` like `credit` (negative balance).
+- **Manual accounts and names, concurrent edits:** `POST /accounts/manual` and `/accounts/rename` read,
+  change and write one KV key; two edits from two devices in the same second can lose one of them
+  (KV has no transactions). Harmless for a single user editing one thing at a time.
 - **Last 4 digits matching:** a new Plaid account with the same last 4 digits and currency as an
   unrelated Wallet account would replace it.
 
@@ -471,7 +510,8 @@ Elsewhere:
   `keep_bindings: ["plain_text", "secret_text", "kv_namespace"]` so existing secrets survive), or paste
   the file into the Cloudflare dashboard editor. Keep the repo copy and the deployed copy identical.
 - **Deploying the PWA:** push to `main`; GitHub Pages rebuilds in about 40 s. Reopen the app (the
-  service worker serves the new shell on the next network-first load).
+  service worker serves the new shell on the next network-first load). Adding a file to the app shell
+  means listing it in `SHELL` in `sw.js` and bumping `CACHE`.
 - **Linking banks:** one bank at a time, once each; check coverage first with "Cerca istituto".
 - **Checking a Plaid bank after linking:** compare the balance and the "in sospeso" line with the bank
   app; a check mark means the bank's available figure confirms the pending amount.
