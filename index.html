@@ -55,6 +55,8 @@ header .asof{color:var(--muted)}
 .chip.act{font-family:inherit;border-style:dashed}
 #chartwrap{position:relative;height:min(58vh,560px);min-height:320px;border-bottom:1px solid var(--line)}
 #chart{position:absolute;inset:0}
+#chartwrap.panes1{height:min(72vh,700px);min-height:420px}
+#chartwrap.panes2{height:min(86vh,840px);min-height:520px}
 #legend{position:absolute;left:12px;top:8px;z-index:3;pointer-events:none;font-size:12px;background:rgba(15,19,28,.72);padding:4px 8px;border-radius:4px}
 #legend b{font-weight:600}
 #flowlines{position:absolute;inset:0;z-index:2;pointer-events:none;overflow:hidden}
@@ -75,6 +77,16 @@ header .asof{color:var(--muted)}
 #drawtools button.on{opacity:1;border-color:var(--accent);background:#1d2b55}
 #drawtools button:disabled{opacity:.3;cursor:default}
 #drawtools button+button{margin-left:-2px}
+#indpanel{position:absolute;left:8px;bottom:106px;z-index:5;max-width:min(420px,calc(100% - 16px));background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:flex;flex-direction:column;gap:6px;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+#indpanel[hidden]{display:none}
+#indpanel .ih{display:flex;justify-content:space-between;align-items:center}
+#indpanel .ir{display:flex;align-items:center;gap:6px}
+#indpanel .ir button{margin-left:auto}
+#indpanel button[data-del],#indpanel button[data-close]{background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 6px}
+#indpanel .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+#indpanel .ia{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+#indpanel select,#indpanel input{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:3px 5px;font-size:12px}
+#indpanel input{width:56px}
 #drawhint{font-size:11px;color:var(--muted);background:rgba(15,19,28,.78);padding:2px 6px;border-radius:4px}
 #drawhint:empty{display:none}
 #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
@@ -305,9 +317,10 @@ tbody tr:hover td.sym{background:var(--panel)}
   <div id="flowlines"></div>
   <div id="drawlayer"></div>
   <div id="drawtools" role="toolbar" aria-label="Strumenti di disegno">
-    <button type="button" data-tool="ruler" title="Righello: misura il movimento tra due punti (Esc per annullare)" aria-label="Righello">📏</button><button type="button" data-tool="marker" title="Marcatore su una candela, con nota facoltativa" aria-label="Marcatore">📍</button><button type="button" data-tool="level" title="Livello orizzontale, con nota facoltativa" aria-label="Livello orizzontale">═</button><button type="button" id="draw-clear" title="Elimina marcatori e livelli di questa vista" aria-label="Elimina marcatori e livelli">🗑</button>
+    <button type="button" data-tool="ruler" title="Righello: misura il movimento tra due punti (Esc per annullare)" aria-label="Righello">📏</button><button type="button" data-tool="marker" title="Marcatore su una candela, con nota facoltativa" aria-label="Marcatore">📍</button><button type="button" data-tool="level" title="Livello orizzontale, con nota facoltativa" aria-label="Livello orizzontale">═</button><button type="button" id="draw-clear" title="Elimina marcatori e livelli di questa vista" aria-label="Elimina marcatori e livelli">🗑</button><button type="button" id="ind-btn" title="Indicatori tecnici: medie mobili, Bande di Bollinger, RSI, MACD" aria-label="Indicatori">ƒx</button>
     <span id="drawhint"></span>
   </div>
+  <div id="indpanel" hidden></div>
   <div id="overlay"><span id="overlay-text">Caricamento…</span></div>
 </div>
 

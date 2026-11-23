@@ -207,13 +207,39 @@ daily candle shows its own date on either side of UTC.
   in every interval (a marker made on a daily or weekly bar goes on the first intraday bar of that day).
 - ═ level: a horizontal line at the tapped value with an optional note; tapping near one removes it.
 - 🗑 removes every marker and level of the view.
+- ƒx indicators: simple and exponential moving averages and Bollinger bands over the price, RSI (with
+  the 70/30 lines) and MACD (line, signal, histogram) each in a pane of its own under it, at most two
+  such panes. Several of each can be added with their own periods (e.g. SMA 50 and SMA 200), at most
+  8 in all; the list applies to every view.
 
 The ruler is a series primitive (`attachPrimitive`), drawn by the chart itself, so it follows scroll,
 zoom and price-axis drags; markers use `createSeriesMarkers` and levels `createPriceLine`. While a tool
 is active a transparent layer over the chart takes the pointer (and stops the page from scrolling under
 the finger); with no tool active the chart behaves exactly as before. Markers and levels are kept per
-view (Tutto, the broker, Crypto, or Simboli… with its set of symbols) in this browser only
-(`localStorage` `pt.drawings`), not shared between devices.
+view (Tutto, the broker, Crypto, or Simboli… with its set of symbols).
+
+Lightweight Charts has no indicators of its own (TradingView keeps them in its larger charting
+products): they are computed in the app from the bars of the view (SMA; EMA seeded with the SMA of its
+first n values; Bollinger with the population standard deviation; Wilder's RSI; MACD from those EMAs)
+and drawn as series. Overlays never drive the price scale (`autoscaleInfoProvider: () => null`), drop
+values at or below zero on the log scale, and are hidden on the % scale, where the library measures
+each series from its own first value and an average would sit away from its price. The chart grows
+with each indicator pane so the price pane keeps about its height. Value labels use a per-series `$`
+format (not `localization.priceFormatter`, which would also reach the RSI and MACD panes).
+
+**Sync of drawings and indicators.** Both are shared by every device through the Worker, in `PLAID_KV`:
+- `drawings` (`GET /drawings`, `POST /drawings`): changes are idempotent operations, `add` (by id,
+  replacing), `remove` and `clear`, one per request or `{ ops: [...] }` (at most 200, applied all or
+  nothing); the answer holds every drawing. Limits: 100 views, 300 markers and 100 levels per view.
+- `indicators` (`GET /indicators`, `POST /indicators` with the whole list, at most 8, each parameter
+  checked against its range).
+
+The app applies a change at once, keeps a local copy (`localStorage` `pt.drawings`, `pt.indicators`)
+and a queue of changes not yet confirmed (`pt.drawingsPending`, `pt.indicatorsDirty`), and syncs when
+it opens, when it comes back to the foreground, every 2 minutes and after each change. Offline, or with
+a Worker that does not know these routes, it keeps working on the local copy and sends the queue later;
+a change the Worker refuses as invalid (400) is dropped. The first sync in a browser uploads the
+markers and levels drawn there before the sync existed (`pt.drawingsSynced`).
 
 ### 4.3 Bank accounts and net worth
 
@@ -470,7 +496,7 @@ Worker `portfolio-snapshot` (Cloudflare → Workers → Settings → Variables a
 | `PLAID_SECRET` | secret | Plaid Production secret |
 | `PLAID_ENV` | text, optional | `production` (default) or `sandbox` |
 | `PLAID_COUNTRY_CODES` | text | comma-separated Plaid country codes for Link and the institution search (kept out of the code) |
-| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `manual` (manual accounts), `labels` (private display labels), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
+| `PLAID_KV` | KV binding | namespace `portfolio-plaid`: `item:<item_id>` (one per linked bank: access token, institution, products), `names` (custom account names), `manual` (manual accounts), `drawings` (chart markers and levels), `indicators` (chart indicators), `labels` (private display labels), `plaid:summary` (shared Plaid cache), `wallet:last` (last good Wallet read) |
 
 Elsewhere:
 

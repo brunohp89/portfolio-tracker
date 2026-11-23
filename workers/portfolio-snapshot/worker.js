@@ -82,6 +82,14 @@ export default {
         await requireToken(request, env);
         return json(await manualAccountsOp(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
       }
+      if (request.method === "POST" && path === "/indicators") {
+        await requireToken(request, env);
+        return json(await saveIndicators(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
+      }
+      if (request.method === "POST" && path === "/drawings") {
+        await requireToken(request, env);
+        return json(await drawingsOp(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
+      }
       if (request.method === "POST" && path === "/accounts/rename") {
         await requireToken(request, env);
         return json(await renameAccount(env, (await request.json().catch(() => ({}))) || {}), 200, cors);
@@ -94,7 +102,7 @@ export default {
       }
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       if (path === "/") return json({ ok: true, app: "portfolio-snapshot" }, 200, cors);
-      if (!["/check", "/wallet", "/labels", "/plaid/institutions", "/accounts/transactions", "/accounts/manual"].includes(path) && !ROUTES[path]) throw new HttpError(404, "not_found");
+      if (!["/check", "/wallet", "/labels", "/plaid/institutions", "/accounts/transactions", "/accounts/manual", "/drawings", "/indicators"].includes(path) && !ROUTES[path]) throw new HttpError(404, "not_found");
 
       await requireToken(request, env);
       if (path === "/wallet") {
@@ -104,6 +112,8 @@ export default {
         return json({ ...summary, manual }, 200, cors);
       }
       if (path === "/accounts/manual") return json({ ok: true, accounts: (await loadManual(env)) || [] }, 200, cors);
+      if (path === "/drawings") return json({ ok: true, drawings: await loadDrawings(env) }, 200, cors);
+      if (path === "/indicators") return json({ ok: true, indicators: await loadIndicators(env) }, 200, cors);
       if (path === "/accounts/transactions") return json(await accountTransactions(env, url.searchParams.get("id")), 200, cors);
       if (path === "/labels") {
         const labels = env.PLAID_KV ? await env.PLAID_KV.get("labels", "json").catch(() => null) : null;
@@ -1169,6 +1179,132 @@ async function manualAccountsOp(env, input) {
   }
   await env.PLAID_KV.put(MANUAL_KEY, JSON.stringify(list));
   return { ok: true, accounts: list };
+}
+
+// ---------- chart markers and levels (drawn in the app, shared by every device) ----------
+
+const DRAWINGS_KEY = "drawings";
+const DRAWINGS_MAX_VIEWS = 100;
+const DRAWINGS_MAX_MARKERS = 300;
+const DRAWINGS_MAX_LEVELS = 100;
+const DRAWINGS_MAX_OPS = 200;
+/** A chart view: a scope, or the chosen symbols (never an Object.prototype name such as __proto__). */
+const DRAWING_VIEW = /^(all|broker|crypto|custom:[\x20-\x7e]{0,290})$/;
+
+const drawingId = (v) => (Number.isSafeInteger(v) && v > 0 ? v : null);
+const drawingText = (v, max) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
+
+function cleanMarker(x) {
+  const m = x && typeof x === "object" ? x : {};
+  const id = drawingId(m.id);
+  if (!id || !Number.isSafeInteger(m.t) || m.t < 0 || m.t > 4e9) throw new HttpError(400, "bad_request", "marker needs an id and a time in seconds");
+  return { id, t: m.t, day: m.day === true, text: drawingText(m.text, 40) };
+}
+function cleanLevel(x) {
+  const l = x && typeof x === "object" ? x : {};
+  const id = drawingId(l.id);
+  const price = Number(l.price);
+  if (!id || typeof l.price !== "number" || !isFinite(price) || Math.abs(price) >= 1e12) throw new HttpError(400, "bad_request", "level needs an id and a price");
+  return { id, price: round2(price), text: drawingText(l.text, 30) };
+}
+
+/** Stored drawings, keeping only well-formed views (an older or damaged value never reaches the app as is). */
+async function loadDrawings(env) {
+  if (!env.PLAID_KV) return {};
+  const raw = await env.PLAID_KV.get(DRAWINGS_KEY, "json").catch(() => null);
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [view, d] of Object.entries(raw)) {
+    if (!DRAWING_VIEW.test(view) || !d || typeof d !== "object") continue;
+    const keep = (list, clean) => (Array.isArray(list) ? list.flatMap((x) => { try { return [clean(x)]; } catch { return []; } }) : []);
+    const markers = keep(d.markers, cleanMarker), levels = keep(d.levels, cleanLevel);
+    if (markers.length || levels.length) out[view] = { markers, levels };
+  }
+  return out;
+}
+
+/**
+ * Applies changes to the drawings and answers with all of them. Each change is idempotent, so the app
+ * can send again the changes made offline: { op: "add", view, kind: "marker" | "level", item } adds or
+ * replaces by id, { op: "remove", view, kind, id } and { op: "clear", view } remove. A single change or
+ * { ops: [...] } (applied in order, all or nothing).
+ */
+async function drawingsOp(env, input) {
+  if (!env.PLAID_KV) throw new HttpError(500, "drawings_not_configured", "the PLAID_KV binding is needed to store chart drawings");
+  const ops = Array.isArray(input.ops) ? input.ops : [input];
+  if (!ops.length || ops.length > DRAWINGS_MAX_OPS) throw new HttpError(400, "bad_request", `from 1 to ${DRAWINGS_MAX_OPS} changes per request`);
+  const all = await loadDrawings(env);
+  for (const o of ops) {
+    const op = o && typeof o === "object" ? o : {};
+    const view = typeof op.view === "string" ? op.view : "";
+    if (!DRAWING_VIEW.test(view)) throw new HttpError(400, "bad_request", "view missing or invalid");
+    if (op.op === "clear") { delete all[view]; continue; }
+    if (op.kind !== "marker" && op.kind !== "level") throw new HttpError(400, "bad_request", 'kind must be "marker" or "level"');
+    const listKey = op.kind === "marker" ? "markers" : "levels";
+    const d = all[view] || { markers: [], levels: [] };
+    if (op.op === "add") {
+      const item = op.kind === "marker" ? cleanMarker(op.item) : cleanLevel(op.item);
+      const list = d[listKey].filter((x) => x.id !== item.id);
+      if (list.length >= (op.kind === "marker" ? DRAWINGS_MAX_MARKERS : DRAWINGS_MAX_LEVELS)) throw new HttpError(400, "too_many", `too many ${listKey} in this view`);
+      d[listKey] = list.concat(item);
+    } else if (op.op === "remove") {
+      d[listKey] = d[listKey].filter((x) => x.id !== op.id);
+    } else {
+      throw new HttpError(400, "bad_request", 'op must be "add", "remove" or "clear"');
+    }
+    if (d.markers.length || d.levels.length) all[view] = d;
+    else delete all[view];
+  }
+  if (Object.keys(all).length > DRAWINGS_MAX_VIEWS) throw new HttpError(400, "too_many", `drawings in at most ${DRAWINGS_MAX_VIEWS} views`);
+  await env.PLAID_KV.put(DRAWINGS_KEY, JSON.stringify(all));
+  return { ok: true, drawings: all };
+}
+
+// ---------- chart indicators (chosen in the app, shared by every device) ----------
+
+const INDICATORS_KEY = "indicators";
+const INDICATORS_MAX = 8;
+/** Parameters of each indicator and their ranges, as in the app (IND_TYPES in tracker.js). */
+const INDICATOR_PARAMS = {
+  sma: { n: [2, 400, 1] },
+  ema: { n: [2, 400, 1] },
+  bb: { n: [2, 400, 1], k: [0.5, 5, 0.5] },
+  rsi: { n: [2, 100, 1] },
+  macd: { f: [2, 100, 1], s: [3, 200, 1], g: [2, 100, 1] },
+};
+
+/** A valid indicator, or an HttpError: { id, type, color, ...parameters inside their ranges }. */
+function cleanIndicator(x) {
+  const a = x && typeof x === "object" ? x : {};
+  const spec = Object.prototype.hasOwnProperty.call(INDICATOR_PARAMS, a.type) ? INDICATOR_PARAMS[a.type] : null;
+  if (!spec || !drawingId(a.id)) throw new HttpError(400, "bad_request", "indicator needs an id and a known type");
+  if (typeof a.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(a.color)) throw new HttpError(400, "bad_request", "indicator color must be #rrggbb");
+  const out = { id: a.id, type: a.type, color: a.color.toLowerCase() };
+  for (const [k, [min, max, step]] of Object.entries(spec)) {
+    const v = Number(a[k]);
+    if (typeof a[k] !== "number" || !isFinite(v) || v < min || v > max || Math.abs(v / step - Math.round(v / step)) > 1e-9) {
+      throw new HttpError(400, "bad_request", `indicator ${a.type}: ${k} must be from ${min} to ${max}`);
+    }
+    out[k] = v;
+  }
+  if (a.type === "macd" && out.f >= out.s) throw new HttpError(400, "bad_request", "MACD: the fast period must be shorter than the slow one");
+  return out;
+}
+
+async function loadIndicators(env) {
+  if (!env.PLAID_KV) return [];
+  const raw = await env.PLAID_KV.get(INDICATORS_KEY, "json").catch(() => null);
+  return Array.isArray(raw) ? raw.flatMap((x) => { try { return [cleanIndicator(x)]; } catch { return []; } }).slice(0, INDICATORS_MAX) : [];
+}
+
+/** Replaces the whole list ({ indicators: [...] }, at most INDICATORS_MAX) and answers with it. */
+async function saveIndicators(env, input) {
+  if (!env.PLAID_KV) throw new HttpError(500, "indicators_not_configured", "the PLAID_KV binding is needed to store chart indicators");
+  if (!Array.isArray(input.indicators) || input.indicators.length > INDICATORS_MAX) throw new HttpError(400, "bad_request", `indicators must be a list of at most ${INDICATORS_MAX}`);
+  const list = input.indicators.map(cleanIndicator);
+  if (new Set(list.map((x) => x.id)).size !== list.length) throw new HttpError(400, "bad_request", "indicator ids must be unique");
+  await env.PLAID_KV.put(INDICATORS_KEY, JSON.stringify(list));
+  return { ok: true, indicators: list };
 }
 
 // ---------- latest transactions of one account (detail view) ----------

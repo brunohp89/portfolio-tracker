@@ -790,6 +790,11 @@ function aggregate(series, constant, start, ivSec) {
 }
 
 /* ------------------------------------------------------------------ chart */
+/*
+ * Dollar labels for the value series. Set per series rather than with localization.priceFormatter,
+ * which would also put a "$" on the RSI and MACD panes.
+ */
+const usdFormat = { type: 'custom', minMove: 0.01, formatter: (v) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 }) };
 const chart = LWC.createChart($('chart'), {
   autoSize: true,
   layout: { background: { type: 'solid', color: '#0f131c' }, textColor: '#8a93a6', fontSize: 11, attributionLogo: true },
@@ -800,7 +805,6 @@ const chart = LWC.createChart($('chart'), {
   // On a phone the chart fills most of the screen: a vertical one-finger swipe on the plot scrolls
   // the page, a horizontal one still pans the chart. See chartTouch below for the exceptions.
   handleScroll: { vertTouchDrag: false },
-  localization: { priceFormatter: (v) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 }) },
 });
 /*
  * The library uses vertTouchDrag for the price axis too: with it off, dragging the Y axis to stretch
@@ -827,7 +831,7 @@ function makeMainSeries() {
   if (mainSeries && mainSeriesType === state.chartType) return;
   if (mainSeries) { detachDrawings(); chart.removeSeries(mainSeries); }
   mainSeriesType = state.chartType;
-  const common = { priceLineVisible: true, lastValueVisible: true };
+  const common = { priceLineVisible: true, lastValueVisible: true, priceFormat: usdFormat };
   if (state.chartType === 'candle') {
     mainSeries = chart.addSeries(LWC.CandlestickSeries, { ...common, upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
   } else if (state.chartType === 'area') {
@@ -890,6 +894,7 @@ function renderSeries(fit) {
   renderRealLine();
   renderFlowLines();
   renderDrawings();
+  renderIndicators();
   if (fit) chart.timeScale().fitContent();
   updateLegend();
   updatePeriodKpi();
@@ -985,7 +990,7 @@ function drawFlowLines() {
   cancelAnimationFrame(flowRaf);
   flowRaf = requestAnimationFrame(() => {
     const box = $('flowlines');
-    const ts = chart.timeScale(), w = ts.width(), axisH = ts.height();
+    const ts = chart.timeScale(), w = ts.width(), axisH = mainPaneBottom();
     const shade = exactShade(ts, w, axisH);
     if (!flowBars.size) { box.innerHTML = shade; return; }
     const pts = [];
@@ -1074,6 +1079,81 @@ const draw = {
   primitive: null,
 };
 const viewKey = () => (state.scope === 'custom' ? 'custom:' + [...state.custom].sort().join(',') : state.scope);
+/*
+ * Markers and levels are shared by every device through the Worker (GET/POST /drawings). Each change is
+ * an idempotent operation ({ op: 'add' | 'remove' | 'clear', view, kind, item | id }): it is applied here
+ * at once, queued in localStorage (pt.drawingsPending) and sent; the Worker answers with every drawing,
+ * which becomes the local copy with the still unsent changes applied on top. Offline, or with a Worker
+ * that does not know /drawings yet, the app keeps working on the local copy and sends the queue later.
+ */
+const DRAW_PENDING_KEY = 'drawingsPending', DRAW_SYNCED_KEY = 'drawingsSynced';
+const DRAW_SYNC_MS = 2 * 60 * 1000;
+draw.pending = ((v) => (Array.isArray(v) ? v.filter((o) => o && typeof o === 'object') : []))(store.get(DRAW_PENDING_KEY, []));
+function applyDrawOp(all, op) {
+  if (!op || typeof op.view !== 'string') return;
+  if (op.op === 'clear') { delete all[op.view]; return; }
+  const key = op.kind === 'marker' ? 'markers' : op.kind === 'level' ? 'levels' : null;
+  if (!key) return;
+  const cur = all[op.view] || {};
+  const d = { markers: Array.isArray(cur.markers) ? cur.markers : [], levels: Array.isArray(cur.levels) ? cur.levels : [] };
+  if (op.op === 'add' && op.item) d[key] = d[key].filter((x) => x.id !== op.item.id).concat(op.item);
+  else if (op.op === 'remove') d[key] = d[key].filter((x) => x.id !== op.id);
+  if (d.markers.length || d.levels.length) all[op.view] = d;
+  else delete all[op.view];
+}
+function saveDrawState() { store.set(DRAW_KEY, draw.all); store.set(DRAW_PENDING_KEY, draw.pending); }
+function changeDrawings(op) {
+  applyDrawOp(draw.all, op);
+  draw.pending.push(op);
+  saveDrawState();
+  syncDrawings();
+}
+let drawSync = { busy: false, again: false };
+async function syncDrawings() {
+  const api = BOOT.drawings;
+  if (!api) return;
+  if (drawSync.busy) { drawSync.again = true; return; }
+  drawSync = { busy: true, again: false };
+  try {
+    let server;
+    if (draw.pending.length) {
+      const sent = draw.pending.slice(0, 200);
+      try { server = (await api.post(sent)).drawings; }
+      catch (e) {
+        if (e.status !== 400) throw e;
+        server = null; // refused as invalid: sending it again would fail again, so drop it
+      }
+      draw.pending = draw.pending.slice(sent.length); // later changes were queued after these
+      if (draw.pending.length) drawSync.again = true;
+      if (!server) server = (await api.get()).drawings;
+    } else {
+      server = (await api.get()).drawings;
+    }
+    const next = server && typeof server === 'object' ? JSON.parse(JSON.stringify(server)) : {};
+    for (const op of draw.pending) applyDrawOp(next, op);
+    const changed = JSON.stringify(next) !== JSON.stringify(draw.all);
+    draw.all = next;
+    saveDrawState();
+    if (changed) { renderDrawings(); updateLegend(); }
+  } catch { /* offline or an older Worker: the local copy and the queue stay, sent at the next sync */ }
+  finally {
+    const again = drawSync.again;
+    drawSync = { busy: false, again: false };
+    if (again) setTimeout(syncDrawings, 0);
+  }
+}
+/** First sync in this browser: what was drawn before the sync existed is queued for upload, once. */
+if (BOOT.drawings && !store.get(DRAW_SYNCED_KEY, false)) {
+  const up = [];
+  for (const [view, d] of Object.entries(draw.all)) {
+    if (!/^(all|broker|crypto|custom:.*)$/.test(view) || !d) continue;
+    for (const m of Array.isArray(d.markers) ? d.markers : []) up.push({ op: 'add', view, kind: 'marker', item: m });
+    for (const l of Array.isArray(d.levels) ? d.levels : []) up.push({ op: 'add', view, kind: 'level', item: l });
+  }
+  draw.pending = up.concat(draw.pending);
+  saveDrawState();
+  store.set(DRAW_SYNCED_KEY, true);
+}
 const rulerViewKey = () => [viewKey(), state.interval, state.valueMode, state.includeStatic].join('|');
 function viewDrawings() {
   const d = draw.all[viewKey()];
@@ -1081,11 +1161,6 @@ function viewDrawings() {
     markers: Array.isArray(d && d.markers) ? d.markers.filter((m) => m && isFinite(m.t)) : [],
     levels: Array.isArray(d && d.levels) ? d.levels.filter((l) => l && isFinite(l.price)) : [],
   };
-}
-function saveViewDrawings(d) {
-  if (d.markers.length || d.levels.length) draw.all[viewKey()] = d;
-  else delete draw.all[viewKey()];
-  store.set(DRAW_KEY, draw.all);
 }
 
 /** Index of the bar holding time t (UTC s), or -1. Markers placed on daily or weekly bars carry day: true. */
@@ -1278,12 +1353,11 @@ function markerAt(pt) {
   const day = !INTERVALS[state.interval].intraday;
   const hit = d.markers.find((m) => barIndexFor(m.t, m.day && !day) === pt.i);
   if (hit) {
-    if (confirm(`Eliminare il marcatore${hit.text ? ` "${hit.text}"` : ''}?`)) { d.markers = d.markers.filter((m) => m !== hit); saveViewDrawings(d); }
+    if (confirm(`Eliminare il marcatore${hit.text ? ` "${hit.text}"` : ''}?`)) changeDrawings({ op: 'remove', view: viewKey(), kind: 'marker', id: hit.id });
   } else {
     const text = prompt('Nota del marcatore (facoltativa)', '');
     if (text === null) return;
-    d.markers.push({ id: Date.now(), t: pt.t, day, text: text.replace(/\s+/g, ' ').trim().slice(0, 40) });
-    saveViewDrawings(d);
+    changeDrawings({ op: 'add', view: viewKey(), kind: 'marker', item: { id: Date.now(), t: pt.t, day, text: text.replace(/\s+/g, ' ').trim().slice(0, 40) } });
   }
   setTool(null);
   renderDrawings();
@@ -1293,12 +1367,11 @@ function levelAt(pt, y) {
   const d = viewDrawings();
   const hit = d.levels.find((l) => { const ly = mainSeries.priceToCoordinate(l.price); return ly != null && Math.abs(ly - y) <= 8; });
   if (hit) {
-    if (confirm(`Eliminare il livello ${fmtUsd(hit.price, Math.abs(hit.price) < 100 ? 2 : 0)}${hit.text ? ` "${hit.text}"` : ''}?`)) { d.levels = d.levels.filter((l) => l !== hit); saveViewDrawings(d); }
+    if (confirm(`Eliminare il livello ${fmtUsd(hit.price, Math.abs(hit.price) < 100 ? 2 : 0)}${hit.text ? ` "${hit.text}"` : ''}?`)) changeDrawings({ op: 'remove', view: viewKey(), kind: 'level', id: hit.id });
   } else {
     const text = prompt(`Nota del livello a ${fmtUsd(pt.p, Math.abs(pt.p) < 100 ? 2 : 0)} (facoltativa)`, '');
     if (text === null) return;
-    d.levels.push({ id: Date.now(), price: Math.round(pt.p * 100) / 100, text: text.replace(/\s+/g, ' ').trim().slice(0, 30) });
-    saveViewDrawings(d);
+    changeDrawings({ op: 'add', view: viewKey(), kind: 'level', item: { id: Date.now(), price: Math.round(pt.p * 100) / 100, text: text.replace(/\s+/g, ' ').trim().slice(0, 30) } });
   }
   setTool(null);
   renderDrawings();
@@ -1347,7 +1420,7 @@ function levelAt(pt, y) {
       const d = viewDrawings();
       if (!d.markers.length && !d.levels.length) return;
       if (!confirm(`Eliminare ${d.markers.length} marcatori e ${d.levels.length} livelli di questa vista?`)) return;
-      saveViewDrawings({ markers: [], levels: [] });
+      changeDrawings({ op: 'clear', view: viewKey() });
       setTool(null); clearRuler(); renderDrawings(); updateLegend();
     }
   });
@@ -1355,6 +1428,300 @@ function levelAt(pt, y) {
     if (e.key !== 'Escape' || (!draw.tool && !draw.ruler)) return;
     setTool(null); clearRuler();
   });
+  // Drawings made on another device show up when the app comes back to the foreground, and every few minutes.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncDrawings(); });
+  setInterval(() => { if (!document.hidden) syncDrawings(); }, DRAW_SYNC_MS);
+  syncDrawings();
+})();
+/* ------------------------------------------------------------------ technical indicators */
+/*
+ * Lightweight Charts has no indicators of its own (TradingView keeps them in its larger charting
+ * products), so they are computed here from the bars of the view: moving averages and Bollinger bands
+ * over the price, RSI and MACD in panes of their own under it. The list is shared by every device
+ * through the Worker (GET/POST /indicators), like markers and levels; it applies to every view.
+ */
+const IND_KEY = 'indicators', IND_DIRTY_KEY = 'indicatorsDirty';
+const IND_MAX = 8, IND_MAX_PANES = 2;
+const IND_COLORS = ['#f0b429', '#e040fb', '#00bcd4', '#ff7043', '#8bc34a', '#90a4ae', '#ffd54f', '#4dd0e1'];
+const IND_TYPES = {
+  sma: { label: 'Media mobile semplice (SMA)', short: 'SMA', pane: false, params: [{ k: 'n', label: 'Periodi', def: 20, min: 2, max: 400 }] },
+  ema: { label: 'Media mobile esponenziale (EMA)', short: 'EMA', pane: false, params: [{ k: 'n', label: 'Periodi', def: 50, min: 2, max: 400 }] },
+  bb: { label: 'Bande di Bollinger', short: 'BB', pane: false, params: [{ k: 'n', label: 'Periodi', def: 20, min: 2, max: 400 }, { k: 'k', label: 'Dev. std', def: 2, min: 0.5, max: 5, step: 0.5 }] },
+  rsi: { label: 'RSI', short: 'RSI', pane: true, params: [{ k: 'n', label: 'Periodi', def: 14, min: 2, max: 100 }] },
+  macd: { label: 'MACD', short: 'MACD', pane: true, params: [{ k: 'f', label: 'Veloce', def: 12, min: 2, max: 100 }, { k: 's', label: 'Lenta', def: 26, min: 3, max: 200 }, { k: 'g', label: 'Segnale', def: 9, min: 2, max: 100 }] },
+};
+/** A valid indicator, or null: { id, type, color, ...params } with every parameter inside its range. */
+function cleanIndicator(x) {
+  const t = x && IND_TYPES[x.type];
+  if (!t || !Number.isSafeInteger(x.id) || x.id <= 0) return null;
+  const out = { id: x.id, type: x.type, color: /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : IND_COLORS[0] };
+  for (const p of t.params) {
+    const v = Number(x[p.k]);
+    out[p.k] = isFinite(v) ? Math.min(p.max, Math.max(p.min, p.step ? Math.round(v / p.step) * p.step : Math.round(v))) : p.def;
+  }
+  return out;
+}
+const cleanIndicators = (v) => (Array.isArray(v) ? v.map(cleanIndicator).filter(Boolean).slice(0, IND_MAX) : []);
+const ind = {
+  list: cleanIndicators(store.get(IND_KEY, [])),
+  dirty: !!store.get(IND_DIRTY_KEY, false), // changed here and not yet saved by the Worker
+  series: new Map(), // id -> { lines: [series], guides: [price lines] }
+  values: new Map(), // id -> { [line]: number[] | null[] } for the bars of the view
+  sync: { busy: false, again: false },
+};
+const indName = (x) => `${IND_TYPES[x.type].short} ${IND_TYPES[x.type].params.map((p) => x[p.k]).join(', ')}`;
+
+// ---- math (bars of the view, oldest first; null where the indicator is not defined yet)
+function smaOf(v, n) {
+  const out = new Array(v.length).fill(null);
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < v.length; i++) {
+    if (v[i] == null) { sum = 0; cnt = 0; continue; }
+    sum += v[i]; cnt++;
+    if (cnt > n) sum -= v[i - n];
+    if (cnt >= n) out[i] = sum / n;
+  }
+  return out;
+}
+/** EMA seeded with the SMA of the first n defined values. */
+function emaOf(v, n) {
+  const out = new Array(v.length).fill(null);
+  const a = 2 / (n + 1);
+  let prev = null, seed = 0, cnt = 0;
+  for (let i = 0; i < v.length; i++) {
+    if (v[i] == null) continue;
+    if (prev == null) {
+      seed += v[i]; cnt++;
+      if (cnt === n) { prev = seed / n; out[i] = prev; }
+    } else { prev = a * v[i] + (1 - a) * prev; out[i] = prev; }
+  }
+  return out;
+}
+function bollingerOf(v, n, k) {
+  const mid = smaOf(v, n), up = new Array(v.length).fill(null), lo = new Array(v.length).fill(null);
+  for (let i = n - 1; i < v.length; i++) {
+    if (mid[i] == null) continue;
+    let s = 0;
+    for (let j = i - n + 1; j <= i; j++) s += (v[j] - mid[i]) ** 2;
+    const sd = Math.sqrt(s / n); // population standard deviation, as TradingView
+    up[i] = mid[i] + k * sd; lo[i] = mid[i] - k * sd;
+  }
+  return { mid, up, lo };
+}
+/** Wilder's RSI. */
+function rsiOf(v, n) {
+  const out = new Array(v.length).fill(null);
+  let gain = 0, loss = 0;
+  for (let i = 1; i < v.length; i++) {
+    const d = v[i] - v[i - 1], g = Math.max(d, 0), l = Math.max(-d, 0);
+    if (i <= n) { gain += g; loss += l; if (i < n) continue; gain /= n; loss /= n; }
+    else { gain = (gain * (n - 1) + g) / n; loss = (loss * (n - 1) + l) / n; }
+    out[i] = loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss);
+  }
+  return out;
+}
+function macdOf(v, f, s, g) {
+  const ef = emaOf(v, f), es = emaOf(v, s);
+  const macd = v.map((_, i) => (ef[i] != null && es[i] != null ? ef[i] - es[i] : null));
+  const signal = emaOf(macd, g);
+  const hist = macd.map((m, i) => (m != null && signal[i] != null ? m - signal[i] : null));
+  return { macd, signal, hist };
+}
+function computeIndicator(x, closes) {
+  if (x.type === 'sma') return { main: smaOf(closes, x.n) };
+  if (x.type === 'ema') return { main: emaOf(closes, x.n) };
+  if (x.type === 'bb') return bollingerOf(closes, x.n, x.k);
+  if (x.type === 'rsi') return { main: rsiOf(closes, x.n) };
+  return macdOf(closes, x.f, x.s, x.g);
+}
+
+// ---- series
+const oscFormat = { type: 'custom', minMove: 0.01, formatter: (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)) };
+function removeIndicatorSeries() {
+  for (const s of ind.series.values()) for (const l of s.lines) { try { chart.removeSeries(l); } catch { /* already gone */ } }
+  ind.series.clear();
+  while (chart.panes().length > 1) chart.removePane(chart.panes().length - 1);
+}
+/** Series for the current list: overlays on the price pane, each oscillator in a pane of its own. */
+function buildIndicatorSeries() {
+  removeIndicatorSeries();
+  let pane = 0;
+  for (const x of ind.list) {
+    const t = IND_TYPES[x.type];
+    const base = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, lineWidth: 1 };
+    if (!t.pane) {
+      // The price decides the scale: a band far from it (or below zero on a log scale) must not squash it.
+      const over = { ...base, color: x.color, priceFormat: usdFormat, autoscaleInfoProvider: () => null };
+      const lines = x.type === 'bb'
+        ? ['up', 'mid', 'lo'].map((k) => chart.addSeries(LWC.LineSeries, { ...over, lineStyle: k === 'mid' ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid }))
+        : [chart.addSeries(LWC.LineSeries, { ...over, lineWidth: 2 })];
+      ind.series.set(x.id, { keys: x.type === 'bb' ? ['up', 'mid', 'lo'] : ['main'], lines, guides: [] });
+      continue;
+    }
+    if (pane >= IND_MAX_PANES) continue;
+    pane++;
+    const osc = { ...base, priceFormat: oscFormat, lastValueVisible: true };
+    if (x.type === 'rsi') {
+      const l = chart.addSeries(LWC.LineSeries, { ...osc, color: x.color, lineWidth: 2, autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) }, pane);
+      const guides = [70, 30].map((p) => l.createPriceLine({ price: p, color: '#8a93a6', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false, title: '' }));
+      ind.series.set(x.id, { keys: ['main'], lines: [l], guides });
+    } else {
+      const hist = chart.addSeries(LWC.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat: oscFormat }, pane);
+      const m = chart.addSeries(LWC.LineSeries, { ...osc, color: x.color, lineWidth: 2 }, pane);
+      const sig = chart.addSeries(LWC.LineSeries, { ...osc, color: 'rgba(209,212,220,.85)', lastValueVisible: false }, pane);
+      ind.series.set(x.id, { keys: ['hist', 'macd', 'signal'], lines: [hist, m, sig], guides: [] });
+    }
+  }
+  const panes = chart.panes();
+  for (let i = 1; i < panes.length; i++) panes[i].setStretchFactor(0.35);
+  if (panes.length) panes[0].setStretchFactor(1);
+  // The chart grows with each indicator pane, so the price pane keeps about its height.
+  $('chartwrap').classList.toggle('panes1', panes.length === 2);
+  $('chartwrap').classList.toggle('panes2', panes.length >= 3);
+  ind.built = JSON.stringify(ind.list);
+}
+const indPoint = (key, v, time, overlay) => {
+  if (v == null || !isFinite(v) || (overlay && state.scaleMode === 1 && v <= 0)) return { time }; // log scale: no value at or below zero
+  return key === 'hist' ? { time, value: v, color: v >= 0 ? 'rgba(38,166,154,.6)' : 'rgba(239,83,80,.6)' } : { time, value: v };
+};
+/** Computes every indicator on the bars of the view and draws it; called on every rebuild. */
+function renderIndicators() {
+  if (ind.built !== JSON.stringify(ind.list)) buildIndicatorSeries();
+  const closes = state.agg.map((b) => b.c);
+  ind.values.clear();
+  for (const x of ind.list) {
+    const s = ind.series.get(x.id);
+    if (!s) continue;
+    const vals = computeIndicator(x, closes);
+    ind.values.set(x.id, vals);
+    const overlay = !IND_TYPES[x.type].pane;
+    // In % mode the library measures every series from its own first value, so an average or a band
+    // would sit away from the price it belongs to: overlays are hidden there.
+    if (overlay) for (const l of s.lines) l.applyOptions({ visible: state.scaleMode !== 2 });
+    s.keys.forEach((k, j) => s.lines[j].setData(state.chartTimes.map((time, i) => indPoint(k, vals[k][i], time, overlay))));
+  }
+  drawFlowLines();
+  placeDrawTools();
+}
+/** Live tick: recompute and move only the last point of each line. */
+function updateIndicatorsTail() {
+  const n = state.agg.length;
+  if (!n || !ind.list.length) return;
+  const closes = state.agg.map((b) => b.c);
+  for (const x of ind.list) {
+    const s = ind.series.get(x.id);
+    if (!s) continue;
+    const vals = computeIndicator(x, closes);
+    ind.values.set(x.id, vals);
+    s.keys.forEach((k, j) => s.lines[j].update(indPoint(k, vals[k][n - 1], state.chartTimes[n - 1], !IND_TYPES[x.type].pane)));
+  }
+}
+function indicatorLegend(idx) {
+  if (!ind.list.length) return '';
+  const parts = [];
+  for (const x of ind.list) {
+    const v = ind.values.get(x.id);
+    if (!v) continue;
+    const t = IND_TYPES[x.type];
+    const fmt = t.pane ? (n) => (n == null ? '—' : n.toFixed(Math.abs(n) >= 100 ? 0 : 2)) : (n) => (n == null ? '—' : fmtUsd(n, Math.abs(n) < 100 ? 2 : 0));
+    const vals = x.type === 'bb' ? [v.up[idx], v.mid[idx], v.lo[idx]] : x.type === 'macd' ? [v.macd[idx], v.signal[idx], v.hist[idx]] : [v.main[idx]];
+    const hidden = !t.pane && state.scaleMode === 2 ? ' <span class="muted">(nascosta in scala %)</span>' : '';
+    parts.push(`<span style="color:${x.color}">${esc(indName(x))}</span> <span class="num">${vals.map(fmt).join(' / ')}</span>${hidden}`);
+  }
+  return parts.length ? '<br>' + parts.join(' &nbsp;') : '';
+}
+/** Height of everything under the price pane (indicator panes and the time axis), in px. */
+function mainPaneBottom() {
+  const h = $('chart').clientHeight - chart.paneSize(0).height;
+  return h > 0 ? h : chart.timeScale().height();
+}
+/** The tool buttons sit at the bottom left of the price pane, above the TradingView logo. */
+function placeDrawTools() {
+  const b = mainPaneBottom() + 40;
+  $('drawtools').style.bottom = b + 'px';
+  $('indpanel').style.bottom = b + 38 + 'px';
+}
+chart.timeScale().subscribeSizeChange(placeDrawTools);
+
+// ---- list changes and sync
+function setIndicators(list) {
+  ind.list = cleanIndicators(list);
+  ind.dirty = true;
+  store.set(IND_KEY, ind.list); store.set(IND_DIRTY_KEY, true);
+  renderIndicators(); updateLegend(); renderIndPanel();
+  syncIndicators();
+}
+async function syncIndicators() {
+  const api = BOOT.indicators;
+  if (!api) return;
+  if (ind.sync.busy) { ind.sync.again = true; return; }
+  ind.sync = { busy: true, again: false };
+  try {
+    const sent = JSON.stringify(ind.list);
+    let server;
+    if (ind.dirty) {
+      try { server = (await api.post(ind.list)).indicators; }
+      catch (e) { if (e.status !== 400) throw e; server = (await api.get()).indicators; } // refused: take the shared list
+      if (JSON.stringify(ind.list) === sent) { ind.dirty = false; store.set(IND_DIRTY_KEY, false); }
+      else ind.sync.again = true; // changed while saving: send the newer list
+    } else {
+      server = (await api.get()).indicators;
+    }
+    if (!ind.dirty) {
+      const next = cleanIndicators(server);
+      if (JSON.stringify(next) !== JSON.stringify(ind.list)) {
+        ind.list = next; store.set(IND_KEY, next);
+        renderIndicators(); updateLegend(); renderIndPanel();
+      }
+    }
+  } catch { /* offline or an older Worker: the local list stays and is sent at the next sync */ }
+  finally {
+    const again = ind.sync.again;
+    ind.sync = { busy: false, again: false };
+    if (again) setTimeout(syncIndicators, 0);
+  }
+}
+
+// ---- panel
+function renderIndPanel() {
+  const box = $('indpanel');
+  if (box.hidden) return;
+  const rows = ind.list.map((x) => `<div class="ir"><span class="sw" style="background:${x.color}"></span>${esc(indName(x))}`
+    + `${IND_TYPES[x.type].pane && ind.list.filter((y) => IND_TYPES[y.type].pane).indexOf(x) >= IND_MAX_PANES ? ' <span class="muted">(non mostrato: al massimo 2 pannelli)</span>' : ''}`
+    + `<button type="button" data-del="${x.id}" title="Rimuovi" aria-label="Rimuovi ${esc(indName(x))}">✕</button></div>`).join('');
+  const type = box.dataset.type && IND_TYPES[box.dataset.type] ? box.dataset.type : 'sma';
+  const opts = Object.entries(IND_TYPES).map(([k, t]) => `<option value="${k}"${k === type ? ' selected' : ''}>${esc(t.label)}</option>`).join('');
+  const params = IND_TYPES[type].params.map((p) => `<label>${esc(p.label)} <input type="number" data-p="${p.k}" value="${p.def}" min="${p.min}" max="${p.max}" step="${p.step || 1}" inputmode="decimal"></label>`).join('');
+  box.innerHTML = `<div class="ih"><b>Indicatori</b><button type="button" data-close title="Chiudi" aria-label="Chiudi">✕</button></div>`
+    + (rows || '<div class="muted">Nessun indicatore attivo.</div>')
+    + (ind.list.length < IND_MAX ? `<div class="ia"><select id="ind-type">${opts}</select>${params}<button type="button" class="btn" data-add>Aggiungi</button></div>` : '<div class="muted">Al massimo 8 indicatori.</div>')
+    + `<div class="muted">Calcolati sulle candele della vista; salvati per tutti i dispositivi.</div>`;
+}
+(function indicatorPanel() {
+  const box = $('indpanel');
+  $('ind-btn').addEventListener('click', () => {
+    box.hidden = !box.hidden;
+    $('ind-btn').classList.toggle('on', !box.hidden);
+    renderIndPanel();
+  });
+  box.addEventListener('change', (e) => { if (e.target.id === 'ind-type') { box.dataset.type = e.target.value; renderIndPanel(); } });
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.hasAttribute('data-close')) { box.hidden = true; $('ind-btn').classList.remove('on'); return; }
+    if (b.dataset.del) { setIndicators(ind.list.filter((x) => String(x.id) !== b.dataset.del)); return; }
+    if (b.hasAttribute('data-add')) {
+      const type = $('ind-type').value;
+      const x = { id: Date.now(), type, color: IND_COLORS.find((c) => !ind.list.some((y) => y.color === c)) || IND_COLORS[ind.list.length % IND_COLORS.length] };
+      for (const inp of box.querySelectorAll('input[data-p]')) x[inp.dataset.p] = Number(inp.value);
+      if (type === 'macd' && x.f >= x.s) { alert('Nel MACD la media veloce deve avere meno periodi della lenta.'); return; }
+      const c = cleanIndicator(x);
+      if (c) setIndicators(ind.list.concat(c));
+    }
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncIndicators(); });
+  setInterval(() => { if (!document.hidden) syncIndicators(); }, DRAW_SYNC_MS);
+  syncIndicators();
 })();
 const TRADE_LABEL = { buy: 'acquisto', sell: 'vendita', reinvest: 'reinvestimento', out: 'trasferimento in uscita', sent: 'inviate dal wallet' };
 function flowLegend(idx) {
@@ -1403,7 +1770,7 @@ function renderRealLine() {
   if (!byBar) return;
   realByBar = byBar;
   const data = [...realByBar.entries()].sort((a, b) => a[0] - b[0]).map(([j, v]) => ({ time: state.chartTimes[j], value: v }));
-  realSeries = chart.addSeries(LWC.LineSeries, { color: '#d1d4dc', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  realSeries = chart.addSeries(LWC.LineSeries, { color: '#d1d4dc', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: usdFormat });
   realSeries.setData(data);
 }
 /** Real value of the view at each bar (the last day of the bucket), or null where it cannot be compared. */
@@ -1495,7 +1862,7 @@ function renderRealOverlay() {
   // Same time mapping as the main series (strictly increasing).
   let prevT = -Infinity;
   for (const c of cps) { c.time = Math.max(toChartTime(c.time), prevT + 1); prevT = c.time; }
-  contribSeries = chart.addSeries(LWC.LineSeries, { color: '#8a93a6', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'versamenti', crosshairMarkerVisible: false,
+  contribSeries = chart.addSeries(LWC.LineSeries, { color: '#8a93a6', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'versamenti', crosshairMarkerVisible: false, priceFormat: usdFormat,
     autoscaleInfoProvider: () => null }); // do not squash the value scale
   contribSeries.setData(cps);
 }
@@ -1528,7 +1895,7 @@ function updateLegend() {
     `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
     [k('A', b.o), k('Max', b.h), k('Min', b.l), k('C', b.c)].join(' &nbsp;') +
     ` &nbsp;<span class="num ${cls(ch)}">${fmtSigned(ch)} (${fmtPct(prev ? ch / prev : 0)})</span>` +
-    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx) + markerLegend(idx));
+    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx) + markerLegend(idx) + indicatorLegend(idx));
 }
 function soloLegend(b) {
   const p = soloPosition();
@@ -1741,11 +2108,13 @@ function applyLiveToChart() {
     state.agg.push(nb); state.chartTimes.push(ct);
     mainSeries.update(toSeriesPoint(nb, ct));
     updateRealLineTail();
+    updateIndicatorsTail();
     renderFlowLines(); // flows booked after the last bar now land on the new one
   } else if (k === last.t) {
     last.c = v; last.h = Math.max(last.h, v); last.l = Math.min(last.l, v);
     mainSeries.update(toSeriesPoint(last, state.chartTimes[state.chartTimes.length - 1]));
     updateRealLineTail();
+    updateIndicatorsTail();
   }
   updateLegend();
   updatePeriodKpi();
@@ -2440,6 +2809,8 @@ $('seg-scale').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   state.scaleMode = +b.dataset.v; store.set('scaleMode', state.scaleMode); markSeg('seg-scale', state.scaleMode);
   chart.priceScale('right').applyOptions({ mode: state.scaleMode });
+  renderIndicators(); // log scale drops overlay values at or below zero; % mode hides overlays
+  updateLegend();
 };
 $('opt-static').onchange = (e) => { state.includeStatic = e.target.checked; store.set('includeStatic', state.includeStatic); renderTable(); updateKpis(); rebuild(false); };
 $('opt-contrib').onchange = (e) => { state.showContrib = e.target.checked; store.set('showContrib', state.showContrib); renderRealOverlay(); };

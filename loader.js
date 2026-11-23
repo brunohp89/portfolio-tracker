@@ -98,7 +98,7 @@ function refresh() {
 function start() {
   el('boot-msg').hidden = true;
   el('connect').classList.remove('show');
-  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd, eurRate, labels: labels || {} });
+  app = window.startTracker({ snapshot: remote.snap, refresh, openConnect, info, bankTotalUsd, eurRate, labels: labels || {}, drawings: drawingsApi, indicators: indicatorsApi });
   renderWallet();
   refreshWallet();
 }
@@ -738,14 +738,30 @@ function loadPlaid() {
 }
 
 async function workerPost(path, body) {
+  return workerCall(path, { method: 'POST', headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' });
+}
+async function workerGet(path) {
+  return workerCall(path, { headers: { Authorization: 'Bearer ' + conn.token }, cache: 'no-store' });
+}
+/** One authenticated Worker call; a failed one throws an Error carrying the HTTP status (0 = unreachable). */
+async function workerCall(path, init) {
+  if (!conn) throw Object.assign(new Error('Worker non collegato'), { status: 0 });
   let res;
-  try {
-    res = await fetch(conn.url + path, { method: 'POST', headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' });
-  } catch { throw new Error('Worker non raggiungibile'); }
+  try { res = await fetch(conn.url + path, init); } catch { throw Object.assign(new Error('Worker non raggiungibile'), { status: 0 }); }
   const out = await res.json().catch(() => null);
-  if (!res.ok || !out || !out.ok) throw new Error((out && out.message) || 'HTTP ' + res.status);
+  if (!res.ok || !out || !out.ok) throw Object.assign(new Error((out && out.message) || 'HTTP ' + res.status), { status: res.status });
   return out;
 }
+/** Chart markers and levels kept by the Worker (PLAID_KV "drawings"), shared by every device. */
+const drawingsApi = {
+  get: () => workerGet('/drawings'),
+  post: (ops) => workerPost('/drawings', { ops }),
+};
+/** Chart indicators kept by the Worker (PLAID_KV "indicators"), shared by every device. */
+const indicatorsApi = {
+  get: () => workerGet('/indicators'),
+  post: (indicators) => workerPost('/indicators', { indicators }),
+};
 
 function startLink(token, itemId, receivedRedirectUri) {
   const handler = window.Plaid.create({
