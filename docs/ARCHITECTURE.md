@@ -201,7 +201,10 @@ The chart always holds the whole history the interval allows, and a period butto
 only zooms into it, with no new download; so indicators, and everything computed on the bars, are the
 same whatever the period. Daily and weekly views load daily bars from 2015 up to a year ago and hourly
 bars for the last year (so recent candles split at local midnight, crypto included, as before); hourly
-and 4-hour views load the last 366 days. Max starts when every symbol of the view has a history; the
+and 4-hour views load the last 366 days, or back to the last contribution when it is older, within the
+729 days of hourly bars Yahoo keeps, so "Dall'ultimo versamento" is offered with every interval. If the
+last contribution is older than that, the period starts at the first hourly bar and the KPI says
+"(dati dal ...)". Max starts when every symbol of the view has a history; the
 other periods keep a younger symbol at its first price before that (as they always did), so the loaded
 history reaches at least 5 years back. "Nel periodo" and the legend's "dall'inizio" are measured from
 the first bar of the selected period. The real history (Storico reale) is always loaded whole too.

@@ -109,8 +109,9 @@ const INTERVALS = {
   '1W':  { sec: 604800, base: '1d',  ranges: ['1Y', '2Y', '5Y', 'MAX'],      def: '5Y', intraday: false },
 };
 const INTERVAL_LABEL = { '1h': '1h', '4h': '4h', '1D': '1G', '1W': '1S' };
-/** History loaded for hourly and 4-hour candles (Yahoo keeps hourly bars for about two years). */
-const INTRADAY_DAYS = 366;
+/** History loaded for hourly and 4-hour candles: at least a year, back to the last contribution when
+ * older, within the about two years of hourly bars Yahoo keeps. */
+const INTRADAY_DAYS = 366, INTRADAY_MAX_DAYS = 729;
 const RANGE_LABEL = { '1D': '1G', '3D': '3G', '5D': '5G', '1M': '1M', '2M': '2M', '3M': '3M', '6M': '6M', '1Y': '1A', '2Y': '2A', '5Y': '5A', 'MAX': 'Max', 'LASTC': 'Dall\'ultimo versamento' };
 // Trading days for short ranges, calendar days for the rest. 2M stays inside Yahoo's 60-day intraday limit.
 const RANGE_DAYS = { '1D': 1, '3D': 3, '5D': 5, '1M': 30, '2M': 58, '3M': 92, '6M': 183, '1Y': 366, '2Y': 731, '5Y': 1827, 'MAX': null };
@@ -170,11 +171,8 @@ const state = {
   status: { crypto: 'off', stocks: 'off' },
 };
 if (!INTERVALS[state.interval]) state.interval = '1h';
-/** Periods offered for an interval: "since the last contribution" with daily and weekly candles. */
-function rangesFor(ivKey) {
-  const base = INTERVALS[ivKey].ranges;
-  return INTERVALS[ivKey].intraday ? base : base.concat(['LASTC']);
-}
+/** Periods offered for an interval, "since the last contribution" with every interval. */
+const rangesFor = (ivKey) => INTERVALS[ivKey].ranges.concat(['LASTC']);
 if (!state.range || !rangesFor(state.interval).includes(state.range)) state.range = INTERVALS[state.interval].def;
 
 function pickSnapshot() {
@@ -1990,7 +1988,10 @@ async function rebuild(fit = true) {
   }
   showOverlay('Caricamento dati…');
   const end = nowSec();
-  let start = iv.intraday ? end - INTRADAY_DAYS * 86400 : MAX_START;
+  // Hourly views reach back to the last contribution too, so "Dall'ultimo versamento" stays a zoom.
+  let start = iv.intraday
+    ? Math.max(end - INTRADAY_MAX_DAYS * 86400, Math.min(end - INTRADAY_DAYS * 86400, lastContribStart() - 86400))
+    : MAX_START;
   if (realActive()) return rebuildReal(seq, iv, scope, start, end);
   const results = await Promise.allSettled(market.map((p) => (iv.intraday ? getBars(p, iv.base, start, end) : getDailyHistory(p, start, end))));
   if (seq !== state.buildSeq) return;
@@ -2665,7 +2666,12 @@ function zoomToRange() {
 function updatePeriodKpi() {
   if (!state.agg.length) { setText($('k-period'), '—'); return; }
   const a = state.agg[periodStartIndex()].o, z = state.agg[state.agg.length - 1].c;
-  setHtml($('k-period'), `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}</span>`);
+  // A period older than the loaded bars (an hourly view and a contribution over two years ago) starts at the first bar.
+  const iv = INTERVALS[state.interval];
+  const from = state.range === 'MAX' ? null : bucketStart(rangeStart(state.range, iv, false), iv.sec);
+  // (4 days of slack: the first bar can come after a weekend or a holiday)
+  const cut = from != null && state.agg[0].t - from > 4 * 86400 ? ` (dati dal ${fmtBarDay(state.agg[0].t)})` : '';
+  setHtml($('k-period'), `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}${cut}</span>`);
 }
 
 const COLS = [
