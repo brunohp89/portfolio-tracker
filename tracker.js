@@ -97,16 +97,20 @@ const store = {
 };
 
 /* ------------------------------------------------------------------ config */
+/*
+ * The chart always holds the whole history the interval allows (daily and weekly: everything; hourly:
+ * INTRADAY_DAYS), and a period only zooms into it, so indicators and the bars before the window are
+ * the same whatever the period. Intervals under one hour are not offered.
+ */
 const INTERVALS = {
-  '1m':  { sec: 60,     base: '1m',  ranges: ['1D', '3D', '5D'],             def: '1D', intraday: true },
-  '5m':  { sec: 300,    base: '5m',  ranges: ['1D', '5D', '1M'],             def: '5D', intraday: true },
-  '15m': { sec: 900,    base: '15m', ranges: ['5D', '1M', '2M'],             def: '5D', intraday: true },
-  '1h':  { sec: 3600,   base: '1h',  ranges: ['1M', '3M', '6M'],             def: '3M', intraday: true },
-  '4h':  { sec: 14400,  base: '1h',  ranges: ['3M', '6M'],                   def: '6M', intraday: true },
+  '1h':  { sec: 3600,   base: '1h',  ranges: ['1M', '3M', '6M', '1Y'],       def: '3M', intraday: true },
+  '4h':  { sec: 14400,  base: '1h',  ranges: ['3M', '6M', '1Y'],             def: '6M', intraday: true },
   '1D':  { sec: 86400,  base: '1d',  ranges: ['3M', '6M', '1Y', '2Y', '5Y', 'MAX'], def: '3M', intraday: false },
   '1W':  { sec: 604800, base: '1d',  ranges: ['1Y', '2Y', '5Y', 'MAX'],      def: '5Y', intraday: false },
 };
-const INTERVAL_LABEL = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1D': '1G', '1W': '1S' };
+const INTERVAL_LABEL = { '1h': '1h', '4h': '4h', '1D': '1G', '1W': '1S' };
+/** History loaded for hourly and 4-hour candles (Yahoo keeps hourly bars for about two years). */
+const INTRADAY_DAYS = 366;
 const RANGE_LABEL = { '1D': '1G', '3D': '3G', '5D': '5G', '1M': '1M', '2M': '2M', '3M': '3M', '6M': '6M', '1Y': '1A', '2Y': '2A', '5Y': '5A', 'MAX': 'Max', 'LASTC': 'Dall\'ultimo versamento' };
 // Trading days for short ranges, calendar days for the rest. 2M stays inside Yahoo's 60-day intraday limit.
 const RANGE_DAYS = { '1D': 1, '3D': 3, '5D': 5, '1M': 30, '2M': 58, '3M': 92, '6M': 183, '1Y': 366, '2Y': 731, '5Y': 1827, 'MAX': null };
@@ -468,14 +472,20 @@ async function coinbaseCandles(product, gran, start, end) {
 }
 
 /**
- * Base resolution for a view. Daily and weekly candles up to one year are built from hourly bars,
- * so they split at local midnight for crypto too; longer views use daily bars.
+ * Whole history for daily and weekly candles: daily bars up to a year ago, then hourly bars, so the
+ * last year's candles split at local midnight (crypto included) as before, and the earlier ones come
+ * from daily bars. Funds only have daily NAVs. hourly: whether the recent part is hourly (day refs).
  */
-function baseFor(ivKey, range) {
-  const iv = INTERVALS[ivKey];
-  if (iv.intraday) return iv.base;
-  const days = range === 'LASTC' ? (nowSec() - lastContribStart()) / 86400 : RANGE_DAYS[range];
-  return days != null && days <= 366 ? '1h' : '1d';
+async function getDailyHistory(p, start, end) {
+  if (p.kind === 'fund') return { ...(await getBars(p, '1d', start, end)), hourly: false };
+  const cut = bucketStart(end - INTRADAY_DAYS * 86400, 86400) + 86400; // first whole local day of the hourly part
+  const [d, h] = await Promise.allSettled([getBars(p, '1d', start, end), getBars(p, '1h', cut - 86400, end)]);
+  if (h.status !== 'fulfilled' || !h.value.bars.length) {
+    if (d.status !== 'fulfilled') throw d.reason;
+    return { ...d.value, hourly: false };
+  }
+  const older = d.status === 'fulfilled' ? d.value.bars.filter((b) => bucketStart(b.t, 86400) < cut) : [];
+  return { bars: older.concat(h.value.bars.filter((b) => b.t >= cut)), meta: h.value.meta, src: h.value.src, hourly: true };
 }
 /** Bars for one position at a base resolution, with source fallbacks and a short cache. */
 async function getBars(p, baseKey, start, end) {
@@ -895,7 +905,7 @@ function renderSeries(fit) {
   renderFlowLines();
   renderDrawings();
   renderIndicators();
-  if (fit) chart.timeScale().fitContent();
+  if (fit) zoomToRange();
   updateLegend();
   updatePeriodKpi();
 }
@@ -1889,7 +1899,7 @@ function updateLegend() {
   const b = state.agg[idx];
   const prev = idx > 0 ? state.agg[idx - 1].c : b.o;
   const ch = b.c - prev;
-  const base = state.agg[0].o;
+  const base = state.agg[periodStartIndex()].o; // "dall'inizio" of the selected period
   const k = (lbl, v) => `<span class="muted">${lbl}</span> <span class="num">${fmtUsd(v)}</span>`;
   setHtml($('legend'),
     `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
@@ -1979,23 +1989,25 @@ async function rebuild(fit = true) {
     state.agg = []; state.aggMeta = null; renderSeries(true); showOverlay(state.scope === 'custom' ? 'Seleziona almeno un simbolo' : 'Nessuna posizione'); return;
   }
   showOverlay('Caricamento dati…');
-  let start = rangeStart(state.range, iv, market.length > 0 && market.every((p) => p.kind === 'crypto'));
   const end = nowSec();
+  let start = iv.intraday ? end - INTRADAY_DAYS * 86400 : MAX_START;
   if (realActive()) return rebuildReal(seq, iv, scope, start, end);
-  const results = await Promise.allSettled(market.map((p) => getBars(p, baseFor(state.interval, state.range), start, end)));
+  const results = await Promise.allSettled(market.map((p) => (iv.intraday ? getBars(p, iv.base, start, end) : getDailyHistory(p, start, end))));
   if (seq !== state.buildSeq) return;
 
   const series = [], missing = [];
   results.forEach((r, i) => {
     const p = market[i];
-    if (r.status === 'fulfilled' && r.value.bars.length) series.push({ p, q: p.qty, bars: r.value.bars, src: r.value.src });
+    if (r.status === 'fulfilled' && r.value.bars.length) series.push({ p, q: p.qty, bars: r.value.bars, src: r.value.src, hourly: iv.intraday || r.value.hourly });
     else missing.push({ p, why: r.status === 'rejected' ? r.reason && r.reason.message : 'nessun dato' });
   });
   const constant = staticValue + missing.reduce((s, m) => s + m.p.qty * priceOf(m.p), 0);
   // Daily bars cannot give the price at local midnight; funds only have daily NAVs anyway.
-  const dailyBase = baseFor(state.interval, state.range) === '1d';
-  refsFromSeries(series.filter((x) => !dailyBase || x.p.kind === 'fund'), ensureDay());
-  if (state.range === 'MAX' && series.length) start = Math.max(start, ...series.map((s) => s.bars[0].t));
+  refsFromSeries(series.filter((x) => x.hourly || x.p.kind === 'fund'), ensureDay());
+  // Max starts when every symbol of the view has a history; the other periods, as before, keep a younger
+  // symbol at its first price before that, so the history reaches at least 5 years back (all of it if shorter).
+  const allFrom = series.length ? Math.max(...series.map((s) => s.bars[0].t)) : start;
+  if (!iv.intraday) start = Math.max(start, Math.min(allFrom, end - RANGE_DAYS['5Y'] * 86400));
   let agg = aggregate(series, constant, start, iv.sec);
   if (!agg.length) {
     // No history at all (e.g. no proxy and only stocks): show a single flat point at the current value.
@@ -2003,7 +2015,7 @@ async function rebuild(fit = true) {
     agg = [{ t: bucketStart(end, iv.sec), o: v, h: v, l: v, c: v }];
   }
   state.agg = agg;
-  state.aggMeta = { start, series, staticValue, missing, interval: state.interval };
+  state.aggMeta = { start, maxFrom: iv.intraday ? start : allFrom, series, staticValue, missing, interval: state.interval };
   hideOverlay();
   renderSeries(fit);
   dirty.chart = true; scheduleFlush();
@@ -2038,7 +2050,7 @@ async function rebuildReal(seq, iv, scope, start, end) {
     if (prev != null && x.t >= start) days.push({ t: x.t, o: prev, h: Math.max(prev, x.v), l: Math.min(prev, x.v), c: x.v });
     prev = x.v;
   }
-  if (state.range === 'MAX' && hist.length) start = hist[0].t;
+  if (hist.length) start = hist[0].t; // the whole real history; a period only zooms
   const tail = aggregate(series, constant, lastT + 86400, 86400).filter((b) => b.t > lastT);
   if (tail.length) tail[0].o = prev; // continue from the last real close
   else {
@@ -2632,9 +2644,27 @@ function renderBench() {
     `Indice del brief fino al ${k.asof}, poi ${k.live ? 'prezzo live di ' + k.tickers : 'ultimo prezzo dello snapshot (prezzo live non ancora arrivato)'}: ${fmtPct(k.step)}.`,
   ].join('\n'));
 }
+/** First bar of the selected period (0 for Max): the bar holding the period's start. */
+function periodStartIndex() {
+  const n = state.agg.length;
+  if (!n) return 0;
+  const iv = INTERVALS[state.interval];
+  const from = state.range === 'MAX' ? state.aggMeta && state.aggMeta.maxFrom : rangeStart(state.range, iv, false);
+  if (from == null) return 0;
+  const s = bucketStart(from, iv.sec);
+  let lo = 0, hi = n;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (state.agg[mid].t < s) lo = mid + 1; else hi = mid; }
+  return Math.min(lo, n - 1);
+}
+/** Shows the selected period: a zoom on the loaded history, which stays whole. */
+function zoomToRange() {
+  const n = state.agg.length;
+  if (!n) return;
+  chart.timeScale().setVisibleLogicalRange({ from: periodStartIndex() - 0.5, to: n - 1 + chart.timeScale().options().rightOffset });
+}
 function updatePeriodKpi() {
   if (!state.agg.length) { setText($('k-period'), '—'); return; }
-  const a = state.agg[0].o, z = state.agg[state.agg.length - 1].c;
+  const a = state.agg[periodStartIndex()].o, z = state.agg[state.agg.length - 1].c;
   setHtml($('k-period'), `<span class="${cls(z - a)}">${fmtSigned(z - a)} (${fmtPct(a ? z / a - 1 : 0)})</span> <span class="muted">${RANGE_LABEL[state.range]}</span>`);
 }
 
@@ -2750,7 +2780,10 @@ function renderToolbar() {
   });
   if (!rangesFor(state.interval).includes(state.range)) { state.range = INTERVALS[state.interval].def; store.set('range', state.range); }
   renderSeg('seg-range', rangesFor(state.interval).map((r) => [r, RANGE_LABEL[r]]), state.range, (v) => {
-    state.range = v; store.set('range', v); renderToolbar(); rebuild(true);
+    // The data already covers every period: zoom, without loading again.
+    state.range = v; store.set('range', v); renderToolbar();
+    if (!state.agg.length) { rebuild(true); return; }
+    zoomToRange(); updatePeriodKpi(); updateLegend();
   });
   markSeg('seg-type', state.chartType);
   markSeg('seg-scale', state.scaleMode);

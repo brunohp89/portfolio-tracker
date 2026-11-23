@@ -196,6 +196,16 @@ daily candle shows its own date on either side of UTC.
 05m", "apre tra 2g 16h"), from the same NYSE calendar used for the dot (weekends, holidays,
 13:00 early closes).
 
+**Chart history and periods.** Candles are hourly, 4-hour, daily or weekly (nothing under one hour).
+The chart always holds the whole history the interval allows, and a period button (3M, 1A, Max, ...)
+only zooms into it, with no new download; so indicators, and everything computed on the bars, are the
+same whatever the period. Daily and weekly views load daily bars from 2015 up to a year ago and hourly
+bars for the last year (so recent candles split at local midnight, crypto included, as before); hourly
+and 4-hour views load the last 366 days. Max starts when every symbol of the view has a history; the
+other periods keep a younger symbol at its first price before that (as they always did), so the loaded
+history reaches at least 5 years back. "Nel periodo" and the legend's "dall'inizio" are measured from
+the first bar of the selected period. The real history (Storico reale) is always loaded whole too.
+
 **Drawing tools.** Four buttons at the bottom left of the chart, TradingView style:
 - 📏 ruler: drag, or tap the start and then the end. A box shows the move between the two points:
   value change and percentage (from the start value, whatever the price scale: $, % or log), number of
