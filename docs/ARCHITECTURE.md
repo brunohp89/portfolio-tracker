@@ -196,6 +196,25 @@ daily candle shows its own date on either side of UTC.
 05m", "apre tra 2g 16h"), from the same NYSE calendar used for the dot (weekends, holidays,
 13:00 early closes).
 
+**Drawing tools.** Four buttons at the bottom left of the chart, TradingView style:
+- 📏 ruler: drag, or tap the start and then the end. A box shows the move between the two points:
+  value change and percentage (from the start value, whatever the price scale: $, % or log), number of
+  bars, time span and dates. Both ends snap to the nearest O/H/L/C of the bar (the close on line and
+  area charts) within 14 px. It is one shot: the measure stays until the next press on the chart, Esc
+  or a change of view, interval or mode.
+- 📍 marker: an arrow above a bar with an optional note (also shown in the legend for that bar);
+  tapping a bar that has one removes it. A marker keeps its time, so it lands on the bar holding it
+  in every interval (a marker made on a daily or weekly bar goes on the first intraday bar of that day).
+- ═ level: a horizontal line at the tapped value with an optional note; tapping near one removes it.
+- 🗑 removes every marker and level of the view.
+
+The ruler is a series primitive (`attachPrimitive`), drawn by the chart itself, so it follows scroll,
+zoom and price-axis drags; markers use `createSeriesMarkers` and levels `createPriceLine`. While a tool
+is active a transparent layer over the chart takes the pointer (and stops the page from scrolling under
+the finger); with no tool active the chart behaves exactly as before. Markers and levels are kept per
+view (Tutto, the broker, Crypto, or Simboli… with its set of symbols) in this browser only
+(`localStorage` `pt.drawings`), not shared between devices.
+
 ### 4.3 Bank accounts and net worth
 
 The "Conti" section and the "Patrimonio totale" KPI come from `GET /wallet` on the Worker.

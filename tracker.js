@@ -825,7 +825,7 @@ let mainSeries = null, mainSeriesType = null, contribSeries = null;
 
 function makeMainSeries() {
   if (mainSeries && mainSeriesType === state.chartType) return;
-  if (mainSeries) chart.removeSeries(mainSeries);
+  if (mainSeries) { detachDrawings(); chart.removeSeries(mainSeries); }
   mainSeriesType = state.chartType;
   const common = { priceLineVisible: true, lastValueVisible: true };
   if (state.chartType === 'candle') {
@@ -835,6 +835,7 @@ function makeMainSeries() {
   } else {
     mainSeries = chart.addSeries(LWC.LineSeries, { ...common, color: '#2962ff', lineWidth: 2 });
   }
+  attachDrawings();
 }
 const toSeriesPoint = (b, time) => state.chartType === 'candle'
   ? { time, open: b.o, high: b.h, low: b.l, close: b.c }
@@ -888,6 +889,7 @@ function renderSeries(fit) {
   renderRealOverlay();
   renderRealLine();
   renderFlowLines();
+  renderDrawings();
   if (fit) chart.timeScale().fitContent();
   updateLegend();
   updatePeriodKpi();
@@ -1048,6 +1050,312 @@ function exactBandDay(from) {
 const fmtBarDay = (t) => new Date(t * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: 'numeric' });
 chart.timeScale().subscribeVisibleLogicalRangeChange(drawFlowLines);
 chart.timeScale().subscribeSizeChange(drawFlowLines);
+/* ------------------------------------------------------------------ drawing tools */
+/*
+ * TradingView-style tools on the main series: a ruler (the move between two points: value, percentage,
+ * bars and time span), bar markers (an arrow with an optional note) and horizontal levels. Markers and
+ * levels are kept per view (scope, and the symbols for Simboli…) in this browser; the ruler is not kept.
+ * While a tool is active a transparent layer over the chart takes the pointer, so with no tool in use
+ * the chart's own pan, zoom and touch handling (chartTouch) work exactly as before.
+ */
+const DRAW_KEY = 'drawings';
+/** A ruler end or a click lands on the nearest bar value (O/H/L/C for candles, the close otherwise) within this distance. */
+const MAGNET_PX = 14;
+const MARKER_COLOR = '#f0b429', LEVEL_COLOR = '#b39ddb';
+const draw = {
+  tool: null,      // 'ruler' | 'marker' | 'level' | null
+  ruler: null,     // { a: { t, p }, b: { t, p } }, bar time (UTC s) and value
+  rulerView: '',   // view the ruler was drawn in: it is dropped when the view changes
+  phase: 'idle',   // ruler: 'drag' (button held), 'second' (waiting for the second tap), 'done'
+  down: null,      // where the ruler gesture started (client px), to tell a drag from a tap
+  all: (() => { const v = store.get(DRAW_KEY, {}); return v && typeof v === 'object' ? v : {}; })(),
+  markersApi: null,
+  levelLines: [],
+  primitive: null,
+};
+const viewKey = () => (state.scope === 'custom' ? 'custom:' + [...state.custom].sort().join(',') : state.scope);
+const rulerViewKey = () => [viewKey(), state.interval, state.valueMode, state.includeStatic].join('|');
+function viewDrawings() {
+  const d = draw.all[viewKey()];
+  return {
+    markers: Array.isArray(d && d.markers) ? d.markers.filter((m) => m && isFinite(m.t)) : [],
+    levels: Array.isArray(d && d.levels) ? d.levels.filter((l) => l && isFinite(l.price)) : [],
+  };
+}
+function saveViewDrawings(d) {
+  if (d.markers.length || d.levels.length) draw.all[viewKey()] = d;
+  else delete draw.all[viewKey()];
+  store.set(DRAW_KEY, draw.all);
+}
+
+/** Index of the bar holding time t (UTC s), or -1. Markers placed on daily or weekly bars carry day: true. */
+function barIndexFor(t, day) {
+  const n = state.agg.length;
+  if (!n) return -1;
+  const iv = INTERVALS[state.interval];
+  if (day && iv.intraday) {
+    const j = firstOnOrAfterNum(state.agg.map((b) => b.t), t);
+    return j < n && state.agg[j].t < t + 86400 ? j : -1;
+  }
+  let lo = 0, hi = n - 1, j = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (state.agg[mid].t <= t) { j = mid; lo = mid + 1; } else hi = mid - 1; }
+  return j >= 0 && t < state.agg[j].t + iv.sec ? j : -1;
+}
+const exactBarIndex = (t) => { const j = barIndexFor(t, false); return j >= 0 && state.agg[j].t === t ? j : -1; };
+
+/** Bar index and value under a point of the plot (px from the chart's top-left), with the magnet; null off the plot. */
+function chartPoint(x, y) {
+  if (!mainSeries || !state.agg.length) return null;
+  const ts = chart.timeScale();
+  if (x < 0 || y < 0 || x > ts.width() || y > chart.paneSize().height) return null;
+  const L = ts.coordinateToLogical(x);
+  let p = mainSeries.coordinateToPrice(y);
+  if (L == null || p == null || !isFinite(p)) return null;
+  const i = Math.max(0, Math.min(state.agg.length - 1, Math.round(L)));
+  const b = state.agg[i];
+  let best = MAGNET_PX;
+  for (const v of state.chartType === 'candle' ? [b.o, b.h, b.l, b.c] : [b.c]) {
+    const cy = mainSeries.priceToCoordinate(v);
+    if (cy != null && Math.abs(cy - y) < best) { best = Math.abs(cy - y); p = v; }
+  }
+  return { i, t: b.t, p };
+}
+
+const fmtSpan = (sec) => {
+  const s = Math.abs(sec);
+  if (s >= 86400) { const d = Math.round(s / 86400); return d >= 365 ? `${(d / 365).toFixed(1).replace('.', ',')} anni (${d}g)` : `${d}g`; }
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? `${h}h${m ? ' ' + m + 'm' : ''}` : `${m}m`;
+};
+const fmtMove = (v) => fmtSigned(v, Math.abs(v) < 100 ? 2 : 0);
+
+/** Pixel geometry and text of the ruler for the current scroll, zoom and price scale, or null. */
+function rulerGeometry(series) {
+  const r = draw.ruler;
+  if (!r || !series) return null;
+  if (draw.rulerView !== rulerViewKey()) { draw.ruler = null; return null; }
+  const ia = exactBarIndex(r.a.t), ib = exactBarIndex(r.b.t);
+  if (ia < 0 || ib < 0) return null;
+  const ts = chart.timeScale();
+  const x1 = ts.timeToCoordinate(state.chartTimes[ia]), x2 = ts.timeToCoordinate(state.chartTimes[ib]);
+  const y1 = series.priceToCoordinate(r.a.p), y2 = series.priceToCoordinate(r.b.p);
+  if (x1 == null || x2 == null || y1 == null || y2 == null) return null;
+  const d = r.b.p - r.a.p;
+  const pct = r.a.p ? d / r.a.p : null;
+  const bars = ib - ia;
+  const day = (t) => new Date(t * 1000).toLocaleDateString('it-IT', { timeZone: TZ(), day: 'numeric', month: 'short', year: '2-digit' });
+  const lines = [
+    `${fmtMove(d)}${pct == null ? '' : ` (${fmtPct(pct)})`}`,
+    `${Math.abs(bars)} ${Math.abs(bars) === 1 ? 'barra' : 'barre'} · ${fmtSpan(r.b.t - r.a.t)}`,
+    INTERVALS[state.interval].intraday && Math.abs(r.b.t - r.a.t) < 86400 ? null : `${day(Math.min(r.a.t, r.b.t))} → ${day(Math.max(r.a.t, r.b.t))}`,
+  ].filter(Boolean);
+  return { x1, x2, y1, y2, up: d >= 0, lines, live: draw.phase !== 'done' };
+}
+function paintRuler(ctx, g, size) {
+  const col = g.up ? '38,166,154' : '239,83,80';
+  const l = Math.min(g.x1, g.x2), r = Math.max(g.x1, g.x2), t = Math.min(g.y1, g.y2), b = Math.max(g.y1, g.y2);
+  ctx.save();
+  ctx.fillStyle = `rgba(${col},.16)`;
+  ctx.fillRect(l, t, Math.max(1, r - l), Math.max(1, b - t));
+  ctx.strokeStyle = `rgba(${col},.95)`;
+  ctx.lineWidth = 1;
+  const arrow = (x0, y0, x1, y1) => {
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    if (len < 2) return;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    if (len < 10) return;
+    const a = Math.atan2(y1 - y0, x1 - x0);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x1 - 7 * Math.cos(a - 0.45), y1 - 7 * Math.sin(a - 0.45));
+    ctx.moveTo(x1, y1); ctx.lineTo(x1 - 7 * Math.cos(a + 0.45), y1 - 7 * Math.sin(a + 0.45));
+    ctx.stroke();
+  };
+  const mx = (g.x1 + g.x2) / 2, my = (g.y1 + g.y2) / 2;
+  arrow(mx, g.y1, mx, g.y2);
+  arrow(g.x1, my, g.x2, my);
+  // Label under the box when the move is down, above it when up; kept inside the plot.
+  ctx.font = '11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+  const lh = 15, padX = 8, padY = 5;
+  const w = Math.max(...g.lines.map((s) => ctx.measureText(s).width)) + 2 * padX;
+  const h = g.lines.length * lh + 2 * padY - 3;
+  let bx = Math.min(Math.max(4, mx - w / 2), size.width - w - 4);
+  let by = g.up ? t - h - 6 : b + 6;
+  if (by < 4) by = b + 6;
+  if (by + h > size.height - 4) by = Math.max(4, t - h - 6);
+  ctx.fillStyle = `rgba(${col},.92)`;
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(bx, by, w, h, 4); ctx.fill(); } else ctx.fillRect(bx, by, w, h);
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'top';
+  g.lines.forEach((s, k) => ctx.fillText(s, bx + padX, by + padY + k * lh));
+  ctx.restore();
+}
+/** Series primitive: the chart draws the ruler in its own paint cycle, so it follows every scroll, zoom and axis drag. */
+function rulerPrimitive() {
+  let series = null, request = null, geo = null;
+  const renderer = { draw(target) { if (geo) target.useMediaCoordinateSpace(({ context, mediaSize }) => paintRuler(context, geo, mediaSize)); } };
+  const view = { renderer: () => renderer, zOrder: () => 'top' };
+  return {
+    attached(p) { series = p.series; request = p.requestUpdate; },
+    detached() { series = null; request = null; },
+    updateAllViews() { geo = rulerGeometry(series); },
+    paneViews: () => [view],
+    redraw() { if (request) request(); },
+  };
+}
+
+function attachDrawings() {
+  draw.primitive = rulerPrimitive();
+  mainSeries.attachPrimitive(draw.primitive);
+  draw.markersApi = LWC.createSeriesMarkers(mainSeries, []);
+  draw.levelLines = [];
+}
+function detachDrawings() {
+  for (const ln of draw.levelLines) { try { mainSeries.removePriceLine(ln); } catch { /* series replaced */ } }
+  draw.levelLines = [];
+  try { if (draw.markersApi) draw.markersApi.detach(); } catch { /* series replaced */ }
+  try { if (draw.primitive) mainSeries.detachPrimitive(draw.primitive); } catch { /* series replaced */ }
+  draw.markersApi = null; draw.primitive = null;
+}
+/** Markers and levels of the current view on the current bars; called on every rebuild. */
+function renderDrawings() {
+  if (!mainSeries || !draw.markersApi) return;
+  const d = viewDrawings();
+  const day = !INTERVALS[state.interval].intraday;
+  const list = [];
+  for (const m of d.markers) {
+    const j = barIndexFor(m.t, m.day && !day);
+    if (j >= 0 && state.chartTimes[j] != null) list.push({ time: state.chartTimes[j], position: 'aboveBar', shape: 'arrowDown', color: MARKER_COLOR, text: m.text || '', id: String(m.id) });
+  }
+  list.sort((a, b) => a.time - b.time);
+  draw.markersApi.setMarkers(list);
+  for (const ln of draw.levelLines) { try { mainSeries.removePriceLine(ln); } catch { /* gone */ } }
+  draw.levelLines = d.levels.map((l) => mainSeries.createPriceLine({
+    price: l.price, color: LEVEL_COLOR, lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true, title: l.text || '',
+  }));
+  if (draw.ruler && draw.rulerView !== rulerViewKey()) draw.ruler = null;
+  if (draw.primitive) draw.primitive.redraw();
+  $('draw-clear').disabled = !d.markers.length && !d.levels.length;
+}
+/** Notes of the markers on a bar, for the legend. */
+function markerLegend(idx) {
+  const b = state.agg[idx];
+  if (!b) return '';
+  const day = !INTERVALS[state.interval].intraday;
+  const notes = viewDrawings().markers.filter((m) => m.text && barIndexFor(m.t, m.day && !day) === idx).map((m) => esc(m.text));
+  return notes.length ? `<br><span style="color:${MARKER_COLOR}">▼ ${notes.join(' · ')}</span>` : '';
+}
+
+const DRAW_HINT = {
+  ruler: 'Righello: trascina, oppure tocca il punto iniziale e poi quello finale',
+  rulerSecond: 'Tocca il punto finale',
+  marker: 'Tocca una candela per il marcatore (toccane una che lo ha per toglierlo)',
+  level: 'Tocca all\'altezza del livello (toccane uno esistente per toglierlo)',
+};
+function setTool(tool) {
+  draw.tool = tool;
+  if (tool === 'ruler') { draw.ruler = null; draw.phase = 'idle'; }
+  if (draw.primitive) draw.primitive.redraw();
+  $('drawlayer').classList.toggle('on', !!tool);
+  for (const b of document.querySelectorAll('#drawtools [data-tool]')) b.classList.toggle('on', b.dataset.tool === tool);
+  $('drawhint').textContent = tool ? DRAW_HINT[tool] : '';
+  if (!tool) chart.clearCrosshairPosition();
+}
+function clearRuler() {
+  draw.ruler = null; draw.phase = 'idle';
+  if (draw.primitive) draw.primitive.redraw();
+}
+function layerPoint(e) {
+  const r = $('chart').getBoundingClientRect();
+  return chartPoint(e.clientX - r.left, e.clientY - r.top);
+}
+function finishRuler() {
+  draw.phase = 'done';
+  setTool(null); // one shot, as on TradingView: the measure stays until the next tap on the chart
+  if (draw.primitive) draw.primitive.redraw();
+}
+function markerAt(pt) {
+  const d = viewDrawings();
+  const day = !INTERVALS[state.interval].intraday;
+  const hit = d.markers.find((m) => barIndexFor(m.t, m.day && !day) === pt.i);
+  if (hit) {
+    if (confirm(`Eliminare il marcatore${hit.text ? ` "${hit.text}"` : ''}?`)) { d.markers = d.markers.filter((m) => m !== hit); saveViewDrawings(d); }
+  } else {
+    const text = prompt('Nota del marcatore (facoltativa)', '');
+    if (text === null) return;
+    d.markers.push({ id: Date.now(), t: pt.t, day, text: text.replace(/\s+/g, ' ').trim().slice(0, 40) });
+    saveViewDrawings(d);
+  }
+  setTool(null);
+  renderDrawings();
+  updateLegend();
+}
+function levelAt(pt, y) {
+  const d = viewDrawings();
+  const hit = d.levels.find((l) => { const ly = mainSeries.priceToCoordinate(l.price); return ly != null && Math.abs(ly - y) <= 8; });
+  if (hit) {
+    if (confirm(`Eliminare il livello ${fmtUsd(hit.price, Math.abs(hit.price) < 100 ? 2 : 0)}${hit.text ? ` "${hit.text}"` : ''}?`)) { d.levels = d.levels.filter((l) => l !== hit); saveViewDrawings(d); }
+  } else {
+    const text = prompt(`Nota del livello a ${fmtUsd(pt.p, Math.abs(pt.p) < 100 ? 2 : 0)} (facoltativa)`, '');
+    if (text === null) return;
+    d.levels.push({ id: Date.now(), price: Math.round(pt.p * 100) / 100, text: text.replace(/\s+/g, ' ').trim().slice(0, 30) });
+    saveViewDrawings(d);
+  }
+  setTool(null);
+  renderDrawings();
+}
+(function drawingTools() {
+  const layer = $('drawlayer');
+  const showCrosshair = (pt) => { if (pt && mainSeries) chart.setCrosshairPosition(pt.p, state.chartTimes[pt.i], mainSeries); };
+  layer.addEventListener('pointerdown', (e) => {
+    if (e.button > 0) return;
+    const pt = layerPoint(e);
+    if (!pt) return;
+    e.preventDefault();
+    if (draw.tool === 'marker') { markerAt(pt); return; }
+    if (draw.tool === 'level') { levelAt(pt, e.clientY - $('chart').getBoundingClientRect().top); return; }
+    if (draw.tool !== 'ruler') return;
+    try { layer.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+    if (draw.phase === 'second') { draw.ruler.b = { t: pt.t, p: pt.p }; finishRuler(); return; }
+    draw.ruler = { a: { t: pt.t, p: pt.p }, b: { t: pt.t, p: pt.p } };
+    draw.rulerView = rulerViewKey();
+    draw.phase = 'drag';
+    draw.down = { x: e.clientX, y: e.clientY };
+    draw.primitive.redraw();
+  });
+  layer.addEventListener('pointermove', (e) => {
+    const pt = layerPoint(e);
+    showCrosshair(pt);
+    if (!pt || draw.tool !== 'ruler' || (draw.phase !== 'drag' && draw.phase !== 'second')) return;
+    draw.ruler.b = { t: pt.t, p: pt.p };
+    draw.primitive.redraw();
+  });
+  layer.addEventListener('pointerup', (e) => {
+    if (draw.tool !== 'ruler' || draw.phase !== 'drag') return;
+    if (Math.hypot(e.clientX - draw.down.x, e.clientY - draw.down.y) > 8) { finishRuler(); return; }
+    draw.phase = 'second';
+    $('drawhint').textContent = DRAW_HINT.rulerSecond;
+  });
+  layer.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') chart.clearCrosshairPosition(); });
+  // With no tool active, the next press on the chart removes the last measure (the press that ends a
+  // measure lands on the layer, so it never clears the measure it has just made).
+  $('chart').addEventListener('pointerdown', () => { if (!draw.tool && draw.ruler) clearRuler(); }, { capture: true, passive: true });
+  $('drawtools').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.tool) { setTool(draw.tool === b.dataset.tool ? null : b.dataset.tool); if (b.dataset.tool === 'ruler' && !draw.tool) clearRuler(); return; }
+    if (b.id === 'draw-clear') {
+      const d = viewDrawings();
+      if (!d.markers.length && !d.levels.length) return;
+      if (!confirm(`Eliminare ${d.markers.length} marcatori e ${d.levels.length} livelli di questa vista?`)) return;
+      saveViewDrawings({ markers: [], levels: [] });
+      setTool(null); clearRuler(); renderDrawings(); updateLegend();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || (!draw.tool && !draw.ruler)) return;
+    setTool(null); clearRuler();
+  });
+})();
 const TRADE_LABEL = { buy: 'acquisto', sell: 'vendita', reinvest: 'reinvestimento', out: 'trasferimento in uscita', sent: 'inviate dal wallet' };
 function flowLegend(idx) {
   const g = flowBars.get(idx);
@@ -1220,7 +1528,7 @@ function updateLegend() {
     `<b>${legendTitle()}</b> · <span class="muted">${INTERVAL_LABEL[state.interval]}</span> · ${fmtBarTime(b.t)}<br>` +
     [k('A', b.o), k('Max', b.h), k('Min', b.l), k('C', b.c)].join(' &nbsp;') +
     ` &nbsp;<span class="num ${cls(ch)}">${fmtSigned(ch)} (${fmtPct(prev ? ch / prev : 0)})</span>` +
-    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx));
+    ` &nbsp;<span class="muted">dall'inizio</span> <span class="num ${cls(b.c - base)}">${fmtPct(base ? b.c / base - 1 : 0)}</span>` + soloLegend(b) + realLegend(idx, b) + flowLegend(idx) + markerLegend(idx));
 }
 function soloLegend(b) {
   const p = soloPosition();

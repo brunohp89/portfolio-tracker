@@ -67,6 +67,16 @@ header .asof{color:var(--muted)}
 #flowlines .exact span{position:absolute;top:6px;right:8px;font-size:10px;color:#8fb0ff;white-space:nowrap;background:rgba(15,19,28,.75);padding:1px 5px;border-radius:3px}
 #flowlines .exact.near{background:rgba(126,87,194,.09);border-left-color:rgba(126,87,194,.45)}
 #flowlines .exact.near span{color:#b39ddb}
+#drawlayer{position:absolute;inset:0;z-index:3;display:none;cursor:crosshair;touch-action:none}
+#drawlayer.on{display:block}
+#drawtools{position:absolute;left:8px;bottom:68px;z-index:3;display:flex;align-items:center;gap:6px;pointer-events:none}
+#drawtools button{pointer-events:auto;width:28px;height:28px;padding:0;border:1px solid var(--line);border-radius:6px;background:rgba(15,19,28,.78);color:var(--text);font-size:14px;line-height:1;cursor:pointer;opacity:.75}
+#drawtools button:hover{opacity:1;border-color:#3a4358}
+#drawtools button.on{opacity:1;border-color:var(--accent);background:#1d2b55}
+#drawtools button:disabled{opacity:.3;cursor:default}
+#drawtools button+button{margin-left:-2px}
+#drawhint{font-size:11px;color:var(--muted);background:rgba(15,19,28,.78);padding:2px 6px;border-radius:4px}
+#drawhint:empty{display:none}
 #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:4;background:rgba(15,19,28,.55);color:var(--muted);font-size:14px}
 #overlay.show{display:flex}
 #banner{display:none;padding:7px 16px;background:#2a2410;color:#e8d49a;border-bottom:1px solid #4a3f17;font-size:12px}
@@ -218,6 +228,7 @@ tbody tr:hover td.sym{background:var(--panel)}
   .iconbtn{padding:6px 11px}
   .chk{min-height:32px}
   .chip{padding:5px 11px}
+  #drawtools button{width:34px;height:34px;font-size:16px}
 }
 @media (hover:none){
   .seg button:not(.on):hover{color:var(--muted);background:none}
@@ -292,6 +303,11 @@ tbody tr:hover td.sym{background:var(--panel)}
   <div id="legend"></div>
   <div id="chart"></div>
   <div id="flowlines"></div>
+  <div id="drawlayer"></div>
+  <div id="drawtools" role="toolbar" aria-label="Strumenti di disegno">
+    <button type="button" data-tool="ruler" title="Righello: misura il movimento tra due punti (Esc per annullare)" aria-label="Righello">📏</button><button type="button" data-tool="marker" title="Marcatore su una candela, con nota facoltativa" aria-label="Marcatore">📍</button><button type="button" data-tool="level" title="Livello orizzontale, con nota facoltativa" aria-label="Livello orizzontale">═</button><button type="button" id="draw-clear" title="Elimina marcatori e livelli di questa vista" aria-label="Elimina marcatori e livelli">🗑</button>
+    <span id="drawhint"></span>
+  </div>
   <div id="overlay"><span id="overlay-text">Caricamento…</span></div>
 </div>
 
