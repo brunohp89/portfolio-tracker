@@ -617,6 +617,43 @@ async function plaidExchange(env, input) {
 
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
+/** Plaid error codes meaning the link itself no longer works until the owner acts (log in again, renew consent). */
+const PLAID_BROKEN_CODE = /LOGIN|CONSENT|EXPIRED|CREDENTIALS|INVALID_MFA|ITEM_LOCKED|ITEM_NOT_SUPPORTED|USER_SETUP_REQUIRED|PASSWORD_RESET|ACCESS_NOT_GRANTED|NO_ACCOUNTS|ITEM_NOT_FOUND|INVALID_ACCESS_TOKEN/;
+/** Failed Plaid updates count as a broken link only once none has succeeded for this long (a bank can be down for a while). */
+const PLAID_FAIL_GRACE_MS = 24 * 60 * 60 * 1000;
+const isoOrNull = (ms) => (ms ? new Date(ms).toISOString() : null);
+
+/**
+ * Whether this bank's link is known to be broken, from Plaid's own answers rather than from how old the
+ * data is (some banks go a day or more without new transactions): a call refused with a link error,
+ * the Item's error in /item/get, an expired consent, or Plaid's updates failing with no success for
+ * PLAID_FAIL_GRACE_MS. When /item/get did not answer and nothing else tells, the last known state stays.
+ */
+function plaidHealth(p, rf) {
+  const { itemInfo, balance, tx, prev, today } = p;
+  const refused = [balance.error, balance.liveError, tx.status === "rejected" && tx.reason, itemInfo.status === "rejected" && itemInfo.reason, rf && rf.error]
+    .find((e) => e && PLAID_BROKEN_CODE.test(e.plaidCode || e.code || ""));
+  if (refused) {
+    return { broken: true, reason: "item_error", code: refused.plaidCode || refused.code, message: refused.plaidMessage || refused.message || null, checkedAt: today };
+  }
+  if (itemInfo.status !== "fulfilled") return (prev && prev.health) || null;
+  const it = itemInfo.value.item || {};
+  if (it.error && it.error.error_code) {
+    return { broken: true, reason: "item_error", code: it.error.error_code, message: it.error.display_message || it.error.error_message || null, checkedAt: today };
+  }
+  const consentEnd = Date.parse(it.consent_expiration_time || "") || 0;
+  if (consentEnd && consentEnd <= today) {
+    return { broken: true, reason: "consent_expired", code: null, message: null, since: isoOrNull(consentEnd), checkedAt: today };
+  }
+  const st = (itemInfo.value.status && itemInfo.value.status.transactions) || {};
+  const failed = Date.parse(st.last_failed_update || "") || 0;
+  const ok = Date.parse(st.last_successful_update || "") || 0;
+  if (failed && failed > ok && today - ok > PLAID_FAIL_GRACE_MS) {
+    return { broken: true, reason: "update_failing", code: null, message: null, since: isoOrNull(ok), lastFailed: isoOrNull(failed), checkedAt: today };
+  }
+  return { broken: false, consentExpiresAt: isoOrNull(consentEnd), checkedAt: today };
+}
+
 /** Last refresh error worth showing: a TIMEOUT stored by an older version only meant "slow bank". */
 const refreshError = (prev) => (prev && prev.txRefreshError && prev.txRefreshError.code !== "TIMEOUT" ? prev.txRefreshError : null);
 
@@ -744,6 +781,7 @@ function plaidBuild(item, p) {
   const rf = p.refreshLate
     ? { at: today, blockedUntil: 0, error: null, requested: true, unconfirmed: true }
     : p.refresh || { at: (prev && prev.txRefreshAt) || 0, blockedUntil: (prev && prev.txRefreshBlockedUntil) || 0, error: refreshError(prev) };
+  const health = plaidHealth(p, rf);
   const status = {
     itemId: item.itemId,
     institution: item.institutionName,
@@ -760,6 +798,7 @@ function plaidBuild(item, p) {
     txRefreshThrottled: !!rf.throttled, // forced read, but this bank was asked less than 5 min ago
     txRefreshBlockedUntil: rf.blockedUntil,
     txRefreshError: rf.error,
+    health,
     balanceLive: live,
     liveAt,
     liveBlockedUntil: liveError && liveError.plaidCode === "BALANCE_LIMIT" ? today + PLAID_LIVE_BLOCK_MS : (prev && prev.liveBlockedUntil) || 0,
@@ -809,6 +848,7 @@ function plaidBuild(item, p) {
         ...acc,
         lastSync,
         txUpdatedAt,
+        health,
         balanceLive: live,
         itemId: item.itemId,
         recent: txOk ? latestTransactions(recent.get(a.account_id) || []) : (old && old.recent) || null,

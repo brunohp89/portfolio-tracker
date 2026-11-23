@@ -251,13 +251,24 @@ balance (with pending under it), credit used, last posted transaction ("Ultimo m
 phones) and last sync ("Ultima sync"/"Sync", date only). The last sync is Plaid's
 `status.transactions.last_successful_update` from `/item/get` (or the time of the live balance read)
 for Plaid accounts, and the Wallet account's `updatedAt` for Wallet bank-synced accounts (Wallet has no
-"last sync" field; `updatedAt` moves on each sync round, so it is an approximation). A bank-synced
-account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—". A green dot before
+"last sync" field; `updatedAt` moves on each sync round, so it is an approximation). A Wallet
+bank-synced account whose last sync is older than 24 hours gets a ⚠️ next to its name; manual accounts show "—". A green dot before
 the sync date marks a Plaid balance read in real time (within the last 5 minutes); no dot means
 Plaid's cached balance. A real-time read says nothing about the transactions: the pending list only
 changes when Plaid refreshes the bank's transactions, so Plaid accounts show a second line under the
 date, "mov. HH:MM" (or the day if not today), with `last_successful_update` (`txUpdatedAt` in
-`/wallet`). The ⚠️ also appears when that time is older than 24 hours, even with a fresh balance.
+`/wallet`).
+
+**Plaid link health:** a Plaid account gets the ⚠️ only when Plaid itself says the link is broken,
+never because its transactions are old (some banks go days without new transactions). The Worker
+builds `health` per Item (also copied on each account) on every Plaid read, from: a call refused with a
+link error code (`ITEM_LOGIN_REQUIRED`, `INVALID_CREDENTIALS`, `ITEM_LOCKED`, consent errors, ...),
+`item.error` in `/item/get`, `item.consent_expiration_time` in the past, or
+`status.transactions.last_failed_update` newer than `last_successful_update` with no success for 24
+hours. `health.reason` is `item_error`, `consent_expired` or `update_failing`. If `/item/get` does not
+answer and no call says otherwise, the last known health is kept. A broken Item also shows the reason
+and a "Riconnetti" button (Plaid Link update mode) in the list of linked banks, even when Plaid still
+serves its cached balances.
 
 **Latest transactions:** tapping an account row opens, under it, how its balance is made and its
 latest transactions (`GET /accounts/transactions?id=<account id>`, loaded on open, reloaded after

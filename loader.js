@@ -146,8 +146,20 @@ let wallet = read(LS.wallet);   // { data, fetchedAt }
 let walletErr = '';
 /** The /wallet read in flight, if any: { promise, force }. */
 let walletRun = null;
-/** A bank-synced account not synced for longer than this gets the alarm icon. */
+/** A Wallet bank-synced account not synced for longer than this gets the alarm icon (Plaid accounts get it
+ * only when Plaid reports the link broken: see plaidBrokenText). */
 const SYNC_ALARM_MS = 24 * 60 * 60 * 1000;
+const fmtWhenFull = (iso) => new Date(iso).toLocaleString('it-IT', { timeZone: TZ() });
+/** Why Plaid says this bank's link is broken (health from the Worker), or '' when it is not known to be. */
+function plaidBrokenText(h) {
+  if (!h || !h.broken) return '';
+  if (h.reason === 'consent_expired') return `Consenso Plaid scaduto${h.since ? ' il ' + fmtWhenFull(h.since) : ''}: ricollega la banca (Riconnetti)`;
+  if (h.reason === 'update_failing') {
+    return `Plaid non riesce ad aggiornare la banca: ultimo tentativo fallito ${h.lastFailed ? 'il ' + fmtWhenFull(h.lastFailed) : ''}, `
+      + (h.since ? `ultimo riuscito il ${fmtWhenFull(h.since)}` : 'nessun aggiornamento riuscito') + '. Prova Riconnetti';
+  }
+  return `Collegamento Plaid interrotto (${h.code || 'errore'}${h.message ? ': ' + h.message : ''}): ricollega la banca (Riconnetti)`;
+}
 const fmtSyncDay = (iso) => iso ? new Date(iso).toLocaleDateString('it-IT', { timeZone: TZ(), day: '2-digit', month: '2-digit' }) : '—';
 /** Time if today, else the day: when Plaid last refreshed a bank's transactions (pending list included). */
 const fmtTxWhen = (iso) => {
@@ -468,16 +480,14 @@ function renderWallet() {
       ren.setAttribute('aria-label', ren.title + ' ' + a.name);
       ren.onclick = () => (a.local ? toggleExtraEditor(a.localId) : renameAccount(a));
       name.append(tag, ren);
-      const syncOld = a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS;
-      // Plaid: a fresh real-time balance can hide transactions (and pending items) not refreshed for days.
-      const txOld = a.source === 'plaid' && a.txUpdatedAt && today - Date.parse(a.txUpdatedAt) > SYNC_ALARM_MS;
-      if (syncOld || txOld) {
+      // Wallet gives no link status, so its age is all there is. Plaid accounts: only Plaid's own
+      // verdict counts (link error, expired consent, failing updates), never how old the transactions are.
+      const syncOld = a.source !== 'plaid' && a.bankSync && !a.local && a.lastSync && today - Date.parse(a.lastSync) > SYNC_ALARM_MS;
+      const broken = a.source === 'plaid' ? plaidBrokenText(a.health) : '';
+      if (syncOld || broken) {
         const al = document.createElement('span');
         al.className = 'alarm'; al.textContent = '⚠️';
-        al.title = (syncOld
-          ? `Non si sincronizza dal ${new Date(a.lastSync).toLocaleString('it-IT', { timeZone: TZ() })}`
-          : `Movimenti non aggiornati da Plaid dal ${new Date(a.txUpdatedAt).toLocaleString('it-IT', { timeZone: TZ() })}`)
-          + ': controlla il collegamento' + (a.source === 'plaid' ? ' in Plaid (Riconnetti)' : ' in Wallet');
+        al.title = syncOld ? `Non si sincronizza dal ${fmtWhenFull(a.lastSync)}: controlla il collegamento in Wallet` : broken;
         name.append(al);
       }
       name.append(a.name);
@@ -811,6 +821,13 @@ function renderPlaidItems(plaid) {
       ? `${it.accounts} ${it.accounts === 1 ? 'conto' : 'conti'}${it.pendingKnown ? '' : ', movimenti in sospeso non ancora disponibili'}`
       : `errore ${it.error && it.error.code}, mostro i dati di Wallet`);
     if (!it.ok) label.className = 'bad';
+    const broken = plaidBrokenText(it.health);
+    if (it.ok && broken) {
+      const w = document.createElement('span');
+      w.className = 'bad';
+      w.textContent = ' · ' + broken;
+      label.append(w);
+    }
     if (it.ok && it.txRefreshError) {
       const w = document.createElement('span');
       w.className = 'bad';
@@ -819,7 +836,7 @@ function renderPlaidItems(plaid) {
       label.append(w);
     }
     row.append(label);
-    if (!it.ok && it.error && /LOGIN|CONSENT|EXPIRED|PENDING_DISCONNECT|PENDING_EXPIRATION/.test(it.error.code || '')) {
+    if (broken || (!it.ok && it.error && /LOGIN|CONSENT|EXPIRED|PENDING_DISCONNECT|PENDING_EXPIRATION/.test(it.error.code || ''))) {
       const b = document.createElement('button');
       b.className = 'btn sec'; b.type = 'button'; b.textContent = 'Riconnetti';
       b.onclick = () => openPlaid(it.itemId);
